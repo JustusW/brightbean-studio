@@ -26,6 +26,7 @@ default wrapping they would see an empty database and publish nothing - the
 test would pass while proving nothing.
 """
 
+import json
 from datetime import timedelta
 from urllib.parse import parse_qs
 
@@ -139,8 +140,13 @@ def run_the_worker():
 # because CI will not forgive it:
 #
 #     gitleaks detect --source . --redact --verbose --no-banner
-def schedule_a_post(*, platform, platform_id, token, caption=CAPTION, instance_url=""):
-    """One account on `platform` with one post due a minute ago."""
+def schedule_a_post(*, platform, platform_id, token, caption=CAPTION, instance_url="", title=""):
+    """One account on `platform` with one post due a minute ago.
+
+    `title` is only meaningful for the platforms whose API demands one - DEV.to
+    refuses an article without it, YouTube and Pinterest carry it as a separate
+    field - so it defaults to empty and most cases never pass it.
+    """
     organization = Organization.objects.create(name=f"E2E {platform} Org")
     workspace = Workspace.objects.create(name=f"E2E {platform} WS", organization=organization)
     account = SocialAccount.objects.create(
@@ -152,7 +158,7 @@ def schedule_a_post(*, platform, platform_id, token, caption=CAPTION, instance_u
         instance_url=instance_url,
         connection_status=SocialAccount.ConnectionStatus.CONNECTED,
     )
-    post = Post.objects.create(workspace=workspace, caption=caption)
+    post = Post.objects.create(workspace=workspace, caption=caption, title=title)
     return PlatformPost.objects.create(
         post=post,
         social_account=account,
@@ -253,3 +259,82 @@ def test_mastodon_posts_a_status_to_its_own_instance(wire, monkeypatch):
     # The API defaults visibility to the account's own setting when the field
     # is absent, so sending it explicitly is what makes the outcome predictable.
     assert body["visibility"] == "public"
+
+
+# ---------------------------------------------------------------------------
+# DEV.to - https://developers.forem.com/api/v1#tag/articles/operation/createArticle
+# ---------------------------------------------------------------------------
+
+DEVTO_ARTICLE_ID = 1234567
+DEVTO_KEY = "devto-personal-api-key"
+DEVTO_TITLE = "Shipping from Brightbean"
+DEVTO_CAPTION = f"{CAPTION} #brightbean"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_devto_publishes_an_article_authenticated_by_its_api_key_header(wire):
+    """A DEV.to article is a JSON POST authenticated by the `api-key` HEADER.
+
+    Forem has no OAuth flow and does not accept a bearer token: every
+    authenticated endpoint is reached with an `api-key` header
+    (https://developers.forem.com/api). The account's stored token IS that key.
+    Sending it the way every other provider here sends one - as
+    `Authorization: Bearer` - answers 401, and no status-level assertion can
+    tell the two apart, because both are "the provider sent the token".
+
+    Three more things this platform does not share with any other case here:
+    the body is JSON under an `article` envelope; `title` is MANDATORY, so it
+    has to travel from Post.title through effective_title to reach the wire;
+    and `published` decides whether the article is live or a draft.
+    """
+    recorder = wire(
+        {
+            "/api/articles": lambda request: httpx.Response(
+                201,
+                json={
+                    "id": DEVTO_ARTICLE_ID,
+                    "title": DEVTO_TITLE,
+                    "url": f"https://dev.to/brightbean/{DEVTO_ARTICLE_ID}",
+                },
+            ),
+            # NOT publishing, and routed anyway - the health check runs inside
+            # the same worker window and calls get_profile. See the Mastodon
+            # case for why leaving it unrouted fails a publishing test for a
+            # reason that has nothing to do with publishing.
+            "/api/users/me": lambda request: httpx.Response(
+                200,
+                json={"id": 99, "username": "brightbean", "name": "Brightbean"},
+            ),
+        }
+    )
+    platform_post = schedule_a_post(
+        platform="devto",
+        platform_id="99",
+        token=DEVTO_KEY,
+        caption=DEVTO_CAPTION,
+        title=DEVTO_TITLE,
+    )
+
+    run_the_worker()
+
+    assert recorder.unexpected == [], f"unpredicted API calls: {recorder.unexpected}"
+    assert_published(platform_post, str(DEVTO_ARTICLE_ID))
+
+    request = recorder.call("/api/articles")
+    assert request.headers["api-key"] == DEVTO_KEY
+    assert "Authorization" not in request.headers, (
+        "the key went out as a bearer token; Forem authenticates on the api-key header and answers 401 to anything else"
+    )
+    # Forem versions its API by Accept header rather than by URL.
+    assert request.headers["accept"] == "application/vnd.forem.api-v1+json"
+
+    article = json.loads(request.content)["article"]
+    assert article["title"] == DEVTO_TITLE
+    assert article["body_markdown"] == DEVTO_CAPTION
+    # Omitted, Forem creates a DRAFT - and nothing downstream would notice,
+    # because the row goes PUBLISHED here either way while the article sits
+    # unpublished on the platform.
+    assert article["published"] is True
+    # The provider parses #hashtags out of the caption into Forem's tag list,
+    # lowercased and stripped of everything that is not alphanumeric.
+    assert article["tags"] == ["brightbean"]
