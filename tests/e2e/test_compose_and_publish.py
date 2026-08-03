@@ -246,16 +246,22 @@ def platforms(a_page):
             """Only an AUTHORISATION request is a platform boundary.
 
             An earlier version treated every outbound request as one, and so
-            answered the page's own flatpickr and chart.js - which this
-            application loads from a public CDN - with an OAuth redirect. That
-            corrupts the page's scripts, including the date picker any
-            scheduling test needs, while looking like a working test.
+            answered the page's own flatpickr and chart.js with an OAuth
+            redirect. That corrupts the page's scripts, including the date
+            picker any scheduling test needs, while looking like a working
+            test. Both are served by this application now, so they never reach
+            this handler at all - the hazard was real while they came from a
+            public CDN, and the rule it taught is kept.
 
             An authorisation request is recognisable without knowing anything
             about this product: it is the one carrying a redirect_uri.
 
-            Note what this leaves standing: the suite fetches those CDN assets
-            over the real internet, so a browser run is not hermetic.
+            NOTHING ON A PAGE COMES FROM A THIRD PARTY any more - flatpickr,
+            chart.js and Swagger UI are vendored, see
+            static/js/vendor/README.md - so a browser run no longer depends on
+            the public internet being up. The only outbound traffic left is
+            what the product sends to the platforms, which is the whole point
+            of this recorder.
             """
             url = route.request.url
 
@@ -388,6 +394,18 @@ def an_image_on_disk():
 #: The video, for the two platforms that take nothing else. Encoded on every
 #: run for the same reason the picture is drawn on every run.
 A_VIDEO = Path(tempfile.gettempdir()) / "brightbean-e2e-tone.mp4"
+
+#: HOW LONG A PERSON WOULD WAIT FOR AN ATTACHMENT TO APPEAR, in milliseconds.
+#:
+#: Generous on purpose. Storing a video is not storing a picture: the
+#: application runs ffmpeg over it for the thumbnail and the duration, and its
+#: own timeout for that is MEDIA_LIBRARY_FFMPEG_TIMEOUT - five minutes. So a
+#: second or two is not a bound anybody chose, it is a bound nobody noticed.
+#:
+#: This is a ceiling, not a delay: the wait ends the moment the thumbnail is
+#: on the screen. It exists so a slow upload FAILS LOUDLY here instead of
+#: letting the next step publish a post the file never reached.
+UPLOAD_PATIENCE = 60_000
 
 
 def a_video_on_disk():
@@ -1655,6 +1673,36 @@ class TestOneProviderAllTheWay:
         # empty upload as defects of the product, and they were defects of
         # this line.
         attaching, its_type = what_this_platform_takes(spec)
+
+        # WAIT FOR THE SERVER TO ANSWER THE UPLOAD, rather than for a fixed
+        # number of milliseconds and a hope.
+        #
+        # THIS IS WHAT MADE THE VIDEO PLATFORMS FLAKY. set_files starts the
+        # upload ASYNCHRONOUSLY, and what used to stand here was
+        # wait_for_load_state("networkidle") followed by wait_for_timeout(1500).
+        # networkidle can be satisfied BEFORE the request has even begun - the
+        # page is already idle - so the entire guarantee was 1500ms.
+        #
+        # A picture fits in that. A VIDEO DOES NOT: it is a far bigger body to
+        # send and to store. On a loaded machine the next step pressed
+        # "Publish Now" a second or so later, and a video-only provider
+        # refused the result - "TikTok only supports VIDEO posts", three
+        # retries later. It only ever bit TikTok and YouTube, only on slow
+        # runs, and every attempt to observe it added enough delay to make it
+        # disappear.
+        #
+        # NOT because of server-side processing, which is worth saying because
+        # it is the obvious guess and it is wrong: process_media_asset - the
+        # background task that would run ffmpeg for the thumbnail and the
+        # duration - is enqueued by the API, by MCP and by the media library,
+        # and NOT by the composer's own upload. Nothing processes a file
+        # attached here at all.
+        #
+        # WAITED FOR THE WAY A PERSON WAITS FOR IT: the thumbnail appears in
+        # the strip, and only then is the post ready to send. The composer
+        # renders that strip SERVER-SIDE and points it at the stored file, so
+        # a thumbnail on the screen is the application saying it has the file.
+        # There is nothing to watch on the wire that a person could not see.
         chosen.value.set_files(
             {
                 "name": Path(attaching).name,
@@ -1663,11 +1711,24 @@ class TestOneProviderAllTheWay:
             }
         )
 
-        # Uploading is a round trip, and the composer shows the picture when
-        # it has finished. Photographed after a pause so the picture is of the
-        # finished state rather than of the upload.
-        a_page.wait_for_load_state("networkidle")
-        a_page.wait_for_timeout(1500)
+        the_thumbnail = (
+            a_page.get_by_role("main").locator("video").first
+            if spec["platform"] in WANTS_VIDEO
+            else a_page.get_by_role("main").get_by_role("img", name=Path(attaching).name).first
+        )
+        expect(the_thumbnail).to_be_visible(timeout=UPLOAD_PATIENCE)
+
+        # AND IT DREW. Being on the page is not enough - videoWidth and
+        # naturalWidth stay 0 until the browser has decoded a frame out of
+        # what the application served, which is the difference between a
+        # thumbnail and a thumbnail-shaped hole. This is also what makes the
+        # wait honest: it ends when the file is really there.
+        a_page.wait_for_function(
+            "element => (element.videoWidth || element.naturalWidth || 0) > 0",
+            arg=the_thumbnail.element_handle(),
+            timeout=UPLOAD_PATIENCE,
+        )
+
         a_journey(a_page, "the-picture-is-attached")
 
         # THE FILE IS ATTACHED, as the composer says: its name appears beside
@@ -1678,6 +1739,23 @@ class TestOneProviderAllTheWay:
         # the browser draws in place of a picture it could not load. An
         # assertion that holds only while something is broken is worse than
         # none: it would have started failing the day the thumbnail worked.
+        # NOTHING WAS REFUSED AND THE POLICY BLOCKED NOTHING - FOR EVERY
+        # PLATFORM, AND BEFORE THE BRANCH BELOW GETS TO RETURN.
+        #
+        # These two assertions used to sit AFTER the video branch's `return`,
+        # so the only two platforms that take video - which are also the only
+        # two that ever fail with "no media on the post" - were the two this
+        # suite never checked for a refused upload. A blocked or failed POST
+        # was invisible exactly where it mattered.
+        #
+        # The frame check below cannot stand in for this: a <video> decodes
+        # perfectly well from a blob the page made for itself, so a picture on
+        # the screen is not evidence that the file reached the server. That is
+        # the same mistake as the old "an <img> is present" check, which
+        # passed for as long as the thumbnail was broken.
+        assert refused == [], f"the browser was refused: {refused}"
+        assert a_page.evaluate("window.__cspViolations || []") == [], "the policy blocked something on this page"
+
         if spec["platform"] in WANTS_VIDEO:
             # A VIDEO IS NOT AN <img>, and it is not enough that one is on the
             # page either: videoWidth stays 0 until the browser has decoded a
@@ -1695,14 +1773,6 @@ class TestOneProviderAllTheWay:
         assert a_page.get_by_role("main").get_by_role("img").count() >= 1, (
             "the post has no picture on it after attaching one"
         )
-
-        # AND THE FILE'S BYTES LEFT THE BROWSER. A PNG carries a signature in
-        # its first four bytes, so finding it inside a request body is proof
-        # the page uploaded the actual file rather than a name, an empty blob
-        # or a preview it had made for itself.
-        # Nothing was refused on the wire and the policy blocked nothing.
-        assert refused == [], f"the browser was refused: {refused}"
-        assert a_page.evaluate("window.__cspViolations || []") == [], "the policy blocked something on this page"
 
         a_journey(a_page, "the-post-with-a-picture-is-ready")
 
