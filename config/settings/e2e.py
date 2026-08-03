@@ -62,3 +62,30 @@ SECURE_SSL_REDIRECT = False
 
 # live_server binds an arbitrary port on localhost.
 ALLOWED_HOSTS = ["*"]
+
+# THE SIGN-UP THROTTLE IS REAL, CORRECT, AND THIS SUITE TRIPS IT.
+#
+# Every browser test starts by signing up, because a test that inserts its own
+# user has not tested creating one. A dozen of them run in about three
+# minutes, all from 127.0.0.1, and django-ratelimit does exactly what it is
+# there for: it starts answering 429. The person then never reaches a page
+# with anything on it, and the failure reads as a missing link rather than as
+# a refusal - which is how it presented, twice, before the log line
+# "Too Many Requests: /accounts/signup/" explained it.
+#
+# So it is off HERE, and the cost is stated rather than hidden: with this set,
+# NOTHING in the browser suite covers the throttle. That deserves its own
+# test - one that signs up until it is refused and asserts the refusal - and
+# such a test would have to switch this back on for itself.
+#
+# This is not the CSP situation at the top of this file. There, a relaxed
+# setting would have hidden a defect in the product. Here the setting protects
+# the product from abuse, and the suite is abusive by construction.
+RATELIMIT_ENABLE = False
+
+# AND THE ONE THAT ACTUALLY ANSWERED 429. Setting RATELIMIT_ENABLE alone
+# changed nothing and the suite failed identically, which is the useful part:
+# /accounts/signup/ is allauth's view, throttled by allauth's OWN limiter, not
+# by the django-ratelimit decorators used elsewhere in this codebase. Emptying
+# this dict turns those off. Both are set because both exist.
+ACCOUNT_RATE_LIMITS = {}
