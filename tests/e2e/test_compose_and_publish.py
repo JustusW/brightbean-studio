@@ -193,6 +193,27 @@ class PlatformEndpoints:
                 return request
         return None
 
+    def exchanged_a_token(self):
+        """True when the application traded the code for a token.
+
+        Recognised by the SHAPE of the request rather than by one platform's
+        path, because every OAuth platform spells its token endpoint
+        differently - /oauth/access_token, /v2/oauth/token/, /token - and this
+        has to hold for any provider on the books, not just the one in front
+        of it. What they share is a POST carrying the authorization code.
+        """
+        return any(
+            request.method == "POST" and AUTHORIZATION_CODE in (request.url.query.decode() + self.body_of(request))
+            for request in self.requests
+        )
+
+    @staticmethod
+    def body_of(request):
+        try:
+            return request.content.decode(errors="replace")
+        except Exception:
+            return ""
+
     def what_happened(self):
         """Everything the platform boundary saw, for a failure message."""
         return (
@@ -302,23 +323,57 @@ def platforms(page, monkeypatch):
     return install
 
 
-@pytest.mark.django_db(transaction=True)
-def test_a_person_can_connect_facebook_through_the_connect_screen(live_server, page, journey, platforms):
-    """Connect a channel the way a person does, against a mocked platform.
+#: The name the platform gives back for the account being installed. The
+#: product should show it once the installation is done - that is how a person
+#: knows it worked.
+ACCOUNT_ON_THE_PLATFORM = "Brightbean Test Page"
 
-    The routes below are the endpoints Facebook itself would serve. Whatever
-    is missing shows up as an unpredicted call rather than a silent pass, so
-    this is also how the rest of the flow gets discovered.
+
+def finish_installing(page, journey):
+    """Complete the installation on whatever the platform's return lands on.
+
+    Some platforms hand back several accounts and the product asks which to
+    install; others come straight back connected. Both are real, so this
+    handles the choice WHEN IT IS OFFERED rather than assuming either.
     """
-    endpoints = platforms(
-        {
-            "/oauth/access_token": lambda request: httpx.Response(
-                200,
-                json={"access_token": "e2e-user-token", "token_type": "bearer", "expires_in": 5184000},
-            ),
-            "/me/accounts": lambda request: httpx.Response(
-                200,
-                json={
+    choose = page.get_by_role("button", name="Connect Selected")
+    if choose.count() == 0:
+        journey(page, "returned-from-the-platform")
+        return
+
+    journey(page, "asked-which-account-to-install")
+    # Tick the account before confirming. Pressing confirm with nothing
+    # selected is a different test, and one worth writing.
+    page.get_by_role("checkbox").first.check()
+    journey(page, "account-chosen")
+
+    choose.click()
+    page.wait_for_load_state("networkidle")
+
+
+def answers(payload, status=200):
+    """A platform endpoint that always answers the same document."""
+    return lambda request: httpx.Response(status, json=payload)
+
+
+#: A token response, which every OAuth platform answers in the same shape.
+A_TOKEN = answers({"access_token": "e2e-user-token", "token_type": "bearer", "expires_in": 5184000})
+
+#: WHAT DIFFERS BETWEEN PLATFORMS, and nothing else does.
+#:
+#: The journey is identical for all of them - press the card's button, get
+#: sent to the platform to authorise, come back with a code, have it
+#: exchanged. Only two things vary: the name on the card, and the endpoints
+#: that platform serves. So those are a table and the journey is one test.
+#:
+#: A platform missing from here is NOT covered. Adding one is adding a row.
+OAUTH_PLATFORMS = {
+    "facebook": {
+        "card": "Facebook",
+        "endpoints": {
+            "/oauth/access_token": A_TOKEN,
+            "/me/accounts": answers(
+                {
                     "data": [
                         {
                             "id": "111222333444555",
@@ -329,14 +384,36 @@ def test_a_person_can_connect_facebook_through_the_connect_screen(live_server, p
                             "picture": {"data": {"url": ""}},
                         }
                     ]
-                },
+                }
             ),
-            "/me": lambda request: httpx.Response(
-                200,
-                json={"id": "e2e-user", "name": "Brightbean Tester", "picture": {"data": {"url": ""}}},
-            ),
-        }
-    )
+            "/me": answers({"id": "e2e-user", "name": "Brightbean Tester", "picture": {"data": {"url": ""}}}),
+        },
+    },
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("platform", sorted(OAUTH_PLATFORMS))
+def test_a_person_can_install_a_provider(platform, live_server, page, journey, platforms):
+    """Install a provider the way a person does, against mocked endpoints.
+
+    ONE JOURNEY, EVERY OAUTH PLATFORM. What a person does is the same in each
+    case - find the card, press its button, approve at the platform, come
+    back - so the differences live in a table and this runs over it.
+
+    The properties asserted are the ones that hold for every OAuth provider,
+    and each of them can fail silently in production:
+
+      the browser is sent to THE PLATFORM'S OWN authorisation page, carrying
+      this deployment's client id, a redirect_uri pointing back at us, and a
+      state; and the code that comes back is EXCHANGED.
+
+    Anything the platform is asked for that the table does not answer is
+    recorded as unpredicted rather than quietly satisfied, so a provider
+    reaching for an endpoint nobody expected shows up here.
+    """
+    spec = OAUTH_PLATFORMS[platform]
+    endpoints = platforms(spec["endpoints"])
 
     sign_up(page, live_server, journey)
     page.get_by_role("link", name="Connect a Channel").click()
@@ -367,7 +444,7 @@ def test_a_person_can_connect_facebook_through_the_connect_screen(live_server, p
     # form. Both facts came out of driving it: "Connect" alone named ten
     # controls identically, which is the accessibility defect this flow
     # uncovered, and the cards were never links at all.
-    connect = page.get_by_role("button", name="Connect Facebook")
+    connect = page.get_by_role("button", name=f"Connect {spec['card']}")
     connect.highlight()
     journey(page, "the-control-about-to-be-clicked")
 
@@ -379,10 +456,31 @@ def test_a_person_can_connect_facebook_through_the_connect_screen(live_server, p
     journey(page, "after-pressing-connect")
 
     assert endpoints.unexpected == [], f"unpredicted platform calls: {endpoints.unexpected}"
+
+    # THE BROWSER WENT TO THE PLATFORM, carrying what the platform needs to
+    # recognise this deployment and get the person back again. Checked on the
+    # URL the application actually built, not on one this test composed.
+    assert endpoints.navigations, f"the browser was never sent to the platform.{endpoints.what_happened()}"
+    authorising = parse_qs(urlsplit(endpoints.navigations[0]).query)
+    assert authorising["redirect_uri"][0].startswith(live_server.url), (
+        f"the platform was told to send the person to {authorising['redirect_uri'][0]}, not back to us"
+    )
+    assert authorising.get("state", [""])[0], "no state was carried, so the callback cannot be tied to this request"
+    assert authorising.get("client_id") or authorising.get("client_key"), (
+        "the authorisation request identified no application"
+    )
+
     # NOT VACUOUS. "no unexpected calls" is trivially true when no call was
     # made at all, which is exactly what the first version of this reported:
     # it passed while the browser sat on the connect screen having done
     # nothing. The flow is only real if the code was actually exchanged.
-    assert endpoints.call("/oauth/access_token") is not None, (
+    assert endpoints.exchanged_a_token(), (
         f"the authorization code was never exchanged.{endpoints.what_happened()}\n  this tab is at: {page.url}"
     )
+
+    finish_installing(page, journey)
+
+    # INSTALLED, as the product itself reports it. Not a row read out of the
+    # database - the account has to be visible to the person who connected it.
+    expect(page.get_by_text(ACCOUNT_ON_THE_PLATFORM).first).to_be_visible()
+    journey(page, "the-account-is-installed")
