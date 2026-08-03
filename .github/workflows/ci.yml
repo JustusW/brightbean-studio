@@ -124,7 +124,14 @@ jobs:
   e2e:
     name: End-to-end (browser + ephemeral Postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # THE SUITE TAKES 7:25 on the machine that last measured it, and this job
+    # does four more slow things before it starts: pip install, an npm build,
+    # a Chromium download with its system dependencies, and an apt install of
+    # the PostgreSQL server binaries. That fits inside twenty minutes on paper
+    # and sits close to it on a runner, which is slower than the machine that
+    # produced the number - and a timeout here would read as a product failure
+    # while being nothing of the kind.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -139,6 +146,28 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      # THE BROWSER SUITE IS INVALID WITHOUT THE COMPILED ASSETS, and this job
+      # has never had them. Tailwind's stylesheet is BUILT, not committed -
+      # theme/static/css/dist/ is in .gitignore - so every page this job
+      # rendered was unstyled: the layout was not the one that ships, elements
+      # sat where they never sit in production, and Playwright's actionability
+      # checks passed against something no customer has ever seen.
+      #
+      # requirements/end-to-end-testing.md states this as a rule and names
+      # these two commands. They were simply never added here.
+      #
+      # No actions/setup-node: every action in this file is pinned by SHA, and
+      # the ubuntu-latest image already ships Node, so this needs no new pin.
+      - name: Build the front-end assets
+        run: npm ci && npm run build
+        working-directory: theme/static_src
+
+      - name: Collect static files
+        run: python manage.py collectstatic --noinput
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.e2e
+          SECRET_KEY: test-secret-key-not-for-production
 
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
