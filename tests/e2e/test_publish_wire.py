@@ -199,7 +199,11 @@ def attach_an_image(post, *, filename="e2e.png"):
         mime_type="image/png",
     )
     asset.file.save(filename, ContentFile(b"pretend this is a png" * 4), save=True)
-    PostMedia.objects.create(post=post, media_asset=asset, position=0)
+    # Position from what is already attached, so calling this twice builds an
+    # ORDERED pair rather than two attachments both claiming position 0. The
+    # engine orders media by position and several platforms are order-sensitive
+    # - a carousel's first item is its cover.
+    PostMedia.objects.create(post=post, media_asset=asset, position=post.media_attachments.count())
     return asset
 
 
@@ -412,6 +416,38 @@ FACEBOOK_POST_ID = "987654321"
 FACEBOOK_TOKEN = "facebook-page-access"
 
 
+def graph_side_traffic(*object_ids, page_id=FACEBOOK_PAGE_ID):
+    """Routes for everything the worker does to a Meta account that is NOT publishing.
+
+    The health check, the inbox poll and the analytics sync all run inside the
+    same worker window, and Facebook is the noisiest account here: page
+    insights are fetched ONE METRIC PER REQUEST, and post insights are
+    attempted against both the bare and the page-scoped id. Leaving them
+    unrouted makes the recorder report dozens of unpredicted calls and fails a
+    publishing test for reasons that have nothing to do with publishing.
+
+    Merge this AFTER the publishing routes - `{**publishing, **side_traffic}` -
+    because the recorder matches path SUFFIXES in insertion order, and a broad
+    route registered first would swallow the narrow publish call.
+    """
+    routes = {
+        "/insights": lambda request: httpx.Response(200, json={"data": []}),
+        "/conversations": lambda request: httpx.Response(200, json={"data": []}),
+        "/v25.0/me": lambda request: httpx.Response(
+            200,
+            json={"id": page_id, "name": "Brightbean", "picture": {"data": {"url": ""}}},
+        ),
+        f"/v25.0/{page_id}": lambda request: httpx.Response(200, json={"followers_count": 7}),
+    }
+    for object_id in object_ids:
+        # BOTH forms, because _resolve_post_fields tries the bare id AND the
+        # page-scoped `{page-id}_{post-id}` when looking for a post's fields.
+        # Routing only the bare one leaves the other unpredicted.
+        for candidate in (object_id, f"{page_id}_{object_id}"):
+            routes[f"/v25.0/{candidate}"] = lambda request, oid=candidate: httpx.Response(200, json={"id": oid})
+    return routes
+
+
 @pytest.mark.django_db(transaction=True)
 def test_facebook_posts_to_the_connected_pages_feed(wire):
     """A Facebook text post is a JSON POST to /{page-id}/feed.
@@ -481,6 +517,124 @@ def test_facebook_posts_to_the_connected_pages_feed(wire):
     # Graph names this field `message`. A post body under any other key is
     # accepted as a 200 with an EMPTY post.
     assert json.loads(request.content) == {"message": CAPTION}
+
+
+FACEBOOK_PHOTO_ID = "photo-single"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_facebook_publishes_a_single_photo_without_staging_it(wire):
+    """One image goes STRAIGHT to /{page-id}/photos, published in that one call.
+
+    The distinction from the multi-photo path is the whole point. A single
+    photo is posted directly and appears immediately; the multi-photo flow has
+    to stage each image UNPUBLISHED first and then attach them to a feed post.
+    Sending `published: false` here would leave the photo staged and INVISIBLE
+    on the page - and the row would still say PUBLISHED, because Graph answers
+    a perfectly good id either way.
+
+    Graph returns both an `id` (the photo) and a `post_id` (the feed story).
+    The provider stores the post half of the latter, because that is what post
+    analytics and the first comment address.
+    """
+    publishing = {
+        f"/{FACEBOOK_PAGE_ID}/photos": lambda request: httpx.Response(
+            200,
+            json={"id": FACEBOOK_PHOTO_ID, "post_id": f"{FACEBOOK_PAGE_ID}_{FACEBOOK_POST_ID}"},
+        ),
+    }
+    recorder = wire({**publishing, **graph_side_traffic(FACEBOOK_POST_ID, FACEBOOK_PHOTO_ID)})
+    platform_post = schedule_a_post(
+        platform="facebook",
+        platform_id=FACEBOOK_PAGE_ID,
+        token=FACEBOOK_TOKEN,
+    )
+    asset = attach_an_image(platform_post.post)
+
+    run_the_worker()
+
+    assert recorder.unexpected == [], f"unpredicted API calls: {recorder.unexpected}"
+    assert_published(platform_post, FACEBOOK_POST_ID)
+
+    request = recorder.call("/photos")
+    assert request.url.path == f"/v25.0/{FACEBOOK_PAGE_ID}/photos"
+    body = json.loads(request.content)
+    assert body["message"] == CAPTION
+    # Graph FETCHES this URL, so it has to be absolute and it has to be the
+    # asset the composer attached.
+    assert body["url"].startswith("http")
+    # Against the STORED url, not the original filename: the storage backend
+    # appends a collision suffix, so `e2e.png` is served as `e2e_vNlz4d1.png`.
+    assert body["url"].endswith(asset.file.url)
+    # The two keys that would silently turn this into the wrong kind of post.
+    assert "published" not in body, "the photo was staged unpublished and never appeared on the page"
+    assert "attached_media" not in body
+
+    assert recorder.call("/feed") is None, "a single photo must not also create a feed post"
+
+
+FACEBOOK_STAGED_PHOTO_IDS = ["photo-first", "photo-second"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_facebook_stages_each_photo_unpublished_then_attaches_them_to_one_post(wire):
+    """Several images become ONE post: stage each unpublished, then attach them.
+
+    Graph has no multi-photo endpoint. The documented flow is to POST each
+    image to /{page-id}/photos with `published: false`, collect the ids, and
+    then create a single feed post carrying `attached_media`. Get any part of
+    that wrong and the failure is not an error - it is a page with two
+    separate photo posts on it, or a set of staged images nobody can see, and
+    a PUBLISHED row either way.
+
+    ORDER is asserted because the attachment order is the order the images
+    appear in, and the engine sorts the attachments by their position.
+    """
+    staged = list(FACEBOOK_STAGED_PHOTO_IDS)
+
+    def stage_a_photo(request):
+        # pop rather than cycle: a third staging call is a defect, and an
+        # IndexError here says so loudly instead of quietly answering again.
+        return httpx.Response(200, json={"id": staged.pop(0)})
+
+    publishing = {
+        f"/{FACEBOOK_PAGE_ID}/photos": stage_a_photo,
+        f"/{FACEBOOK_PAGE_ID}/feed": lambda request: httpx.Response(
+            200,
+            json={"id": f"{FACEBOOK_PAGE_ID}_{FACEBOOK_POST_ID}"},
+        ),
+    }
+    recorder = wire({**publishing, **graph_side_traffic(FACEBOOK_POST_ID, *FACEBOOK_STAGED_PHOTO_IDS)})
+    platform_post = schedule_a_post(
+        platform="facebook",
+        platform_id=FACEBOOK_PAGE_ID,
+        token=FACEBOOK_TOKEN,
+    )
+    first = attach_an_image(platform_post.post, filename="first.png")
+    second = attach_an_image(platform_post.post, filename="second.png")
+
+    run_the_worker()
+
+    assert recorder.unexpected == [], f"unpredicted API calls: {recorder.unexpected}"
+    assert_published(platform_post, FACEBOOK_POST_ID)
+
+    stagings = [r for r in recorder.requests if r.url.path.endswith("/photos")]
+    assert len(stagings) == 2, f"expected two staged photos, got {len(stagings)}"
+    for staging, asset in zip(stagings, (first, second), strict=True):
+        body = json.loads(staging.content)
+        # UNPUBLISHED is what makes these attachable instead of two posts.
+        assert body["published"] is False, "the photo was published on its own instead of being staged"
+        assert body["url"].endswith(asset.file.url)
+        assert "message" not in body, "a caption on a staged photo would caption the wrong object"
+
+    feed = json.loads(recorder.call("/feed").content)
+    assert feed["message"] == CAPTION
+    assert feed["attached_media"] == [{"media_fbid": "photo-first"}, {"media_fbid": "photo-second"}], (
+        "the staged photos did not reach the post, or reached it out of order"
+    )
+    # Nothing was cleaned up: the deletion path exists for FAILED staging, and
+    # firing it on success would delete the photos out of the live post.
+    assert [r for r in recorder.requests if r.method == "DELETE"] == []
 
 
 # ---------------------------------------------------------------------------
