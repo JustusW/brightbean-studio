@@ -75,7 +75,7 @@ def test_the_api_docs_page_carries_a_real_nonce(live_server):
     )
 
 
-def test_browser_reports_no_csp_violations(live_server, csp_page):
+def test_browser_reports_no_csp_violations(live_server, csp_page, journey):
     """A real browser executes the page without the policy refusing anything.
 
     Waiting on window.Alpine is a positive control: it proves scripts genuinely
@@ -83,7 +83,10 @@ def test_browser_reports_no_csp_violations(live_server, csp_page):
     loaded.
     """
     csp_page.goto(live_server.url + NONCE_BEARING_PAGE_PATH, wait_until="domcontentloaded")
+    journey(csp_page, "the-page-under-an-enforced-policy")
+
     csp_page.wait_for_function("window.Alpine !== undefined", timeout=15000)
+    journey(csp_page, "after-the-scripts-have-run")
 
     violations = csp_page.evaluate("window.__cspViolations || []")
 
