@@ -39,12 +39,17 @@ EMAIL = "e2e-composer@brightbean.test"
 PASSWORD = "compose-a-post-8"
 
 
-def sign_up(page, live_server, journey):
+def sign_up(page, live_server, journey, email=EMAIL):
     """Create an account through the sign-up form, as a new customer would.
 
     Labelled controls only. If the email field stops being labelled "Email",
     or the button stops saying "Create Account", this breaks - which is the
     intent: those are the things a person reads.
+
+    THE ADDRESS IS AN ARGUMENT because the serial suite no longer resets the
+    database between steps, so every provider's run has to be a DIFFERENT
+    person. Reusing one address would meet the product's own "that email is
+    taken" and fail on the second provider - correctly, and confusingly.
     """
     page.goto(live_server.url, wait_until="domcontentloaded")
     journey(page, "front-door")
@@ -53,7 +58,7 @@ def sign_up(page, live_server, journey):
     page.wait_for_load_state("domcontentloaded")
     journey(page, "sign-up-form")
 
-    page.get_by_label("Email").fill(EMAIL)
+    page.get_by_label("Email").fill(email)
     page.get_by_label("Password").fill(PASSWORD)
     journey(page, "sign-up-filled-in")
 
@@ -89,46 +94,6 @@ def dismiss_the_onboarding_checklist(page, journey):
     # the click and calling it dismissed.
     expect(close).to_have_count(0)
     journey(page, "onboarding-dismissed")
-
-
-@pytest.mark.django_db(transaction=True)
-def test_a_new_customer_can_create_an_account_and_gets_somewhere(live_server, page, journey):
-    """Sign up, and look at whatever the product does next.
-
-    Where this lands decides everything after it, and it is not something to
-    assume: signing up turns out to create the organization AND a workspace
-    and to land on the publishing queue, so no fixture has to invent them.
-    """
-    sign_up(page, live_server, journey)
-
-    assert live_server.url in page.url
-    assert "Create your account" not in page.content(), (
-        "still on the sign-up form after submitting it - the account was not created"
-    )
-
-
-@pytest.mark.django_db(transaction=True)
-def test_a_new_customer_is_offered_a_way_to_connect_a_channel(live_server, page, journey):
-    """Signing up leaves an account with nowhere to publish. Follow the offer.
-
-    The landing page's own call to action is "Connect a Channel", and the
-    checklist's first item is "Connect social accounts", so a person's next
-    move is not in doubt.
-    """
-    sign_up(page, live_server, journey)
-
-    # A LINK, not a button, despite looking like one. Addressed as the role it
-    # actually has: Playwright's role selector is strict, and the first
-    # attempt at this timed out waiting for a button that is not there.
-    page.get_by_role("link", name="Connect a Channel").click()
-    page.wait_for_load_state("networkidle")
-    journey(page, "connect-a-platform")
-
-    assert page.get_by_role("link", name="Connect").count() > 0, (
-        "the connect screen offers nothing to connect - every platform is "
-        "probably rendered disabled because this deployment holds no app "
-        "credentials for any of them"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -222,9 +187,18 @@ class PlatformEndpoints:
         )
 
 
-@pytest.fixture
-def platforms(page, monkeypatch):
-    """Install both halves of the platform boundary and return the recorder."""
+@pytest.fixture(scope="class")
+def platforms(a_page):
+    """Install both halves of the platform boundary and return the recorder.
+
+    CLASS SCOPE, because the suite below is one continuous session per
+    provider: the browser, the account and the connected channel all outlive a
+    single test, so the boundary they talk through has to as well. monkeypatch
+    is function-scoped and cannot be used here, so the same undoing is done by
+    hand.
+    """
+    page = a_page
+    undo = pytest.MonkeyPatch()
 
     def install(routes):
         endpoints = PlatformEndpoints(routes)
@@ -317,16 +291,27 @@ def platforms(page, monkeypatch):
             kwargs["transport"] = httpx.MockTransport(endpoints.handle)
             return real_client(*args, **kwargs)
 
-        monkeypatch.setattr(httpx, "Client", client_with_mock_transport)
+        undo.setattr(httpx, "Client", client_with_mock_transport)
         return endpoints
 
-    return install
+    yield install
+    undo.undo()
 
 
 #: The name the platform gives back for the account being installed. The
 #: product should show it once the installation is done - that is how a person
 #: knows it worked.
 ACCOUNT_ON_THE_PLATFORM = "Brightbean Test Page"
+
+#: What the person writes. Distinctive on purpose: it has to be recognisable
+#: on the preview pane, in the queue, and in the body of the request that
+#: reaches the platform, so that finding it there proves it travelled the
+#: whole way rather than merely being typed.
+A_POST_ABOUT_COFFEE = "Fresh beans, brewed bright. Come and taste the new roast."
+
+#: As much of it as a calendar chip has room for. The chip truncates, so this
+#: is what can honestly be looked for there.
+THE_OPENING_WORDS = "Fresh beans"
 
 
 def finish_installing(page, journey):
@@ -559,65 +544,32 @@ OAUTH_PLATFORMS = {
 }
 
 
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("platform", sorted(OAUTH_PLATFORMS))
-def test_a_person_can_install_a_provider(platform, live_server, page, journey, platforms):
-    """Install a provider the way a person does, against mocked endpoints.
+@pytest.fixture(scope="class", params=sorted(OAUTH_PLATFORMS))
+def spec(request):
+    """The provider this run of the suite is about - one run per row."""
+    return {"platform": request.param, **OAUTH_PLATFORMS[request.param]}
 
-    ONE JOURNEY, EVERY OAUTH PLATFORM. What a person does is the same in each
-    case - find the card, press its button, approve at the platform, come
-    back - so the differences live in a table and this runs over it.
 
-    The properties asserted are the ones that hold for every OAuth provider,
-    and each of them can fail silently in production:
+@pytest.fixture(scope="class")
+def endpoints(platforms, spec):
+    """The platform's own endpoints, answered for this provider's whole run."""
+    return platforms(spec["endpoints"])
 
-      the browser is sent to THE PLATFORM'S OWN authorisation page, carrying
-      this deployment's client id, a redirect_uri pointing back at us, and a
-      state; and the code that comes back is EXCHANGED.
 
-    Anything the platform is asked for that the table does not answer is
-    recorded as unpredicted rather than quietly satisfied, so a provider
-    reaching for an endpoint nobody expected shows up here.
-    """
-    spec = OAUTH_PLATFORMS[platform]
-    endpoints = platforms(spec["endpoints"])
-
-    sign_up(page, live_server, journey)
-    page.get_by_role("link", name="Connect a Channel").click()
-    page.wait_for_load_state("networkidle")
-    journey(page, "connect-a-platform")
-
-    # The browser's own report of what went wrong on the page. Not internals:
-    # this is what the developer console shows anybody who opens it, and a
-    # page whose scripts are failing is a fact about the page.
-    complaints = []
-    page.on("console", lambda message: complaints.append(f"{message.type}: {message.text}"))
-    page.on("pageerror", lambda error: complaints.append(f"pageerror: {error}"))
-
-    # SHOW ME WHAT I AM ABOUT TO CLICK, then photograph it.
-    #
-    # Role names match by SUBSTRING, and this page has more than one thing
-    # containing "Connect" - the onboarding checklist offers a row called
-    # "Connect social accounts" which leads back to this very page, so
-    # clicking it looks exactly like nothing happening. Matching EXACTLY
-    # "Connect" instead matches nothing at all, because the cards' control
-    # carries a trailing arrow.
-    #
-    # So rather than guess a third time: highlight the candidate, take its
-    # picture, and read the picture.
+def connect_the_channel(page, journey, spec):
+    """From the connect screen to an installed channel."""
+    # THE PANEL HAS TO GO FIRST. Its first row is called "Connect social
+    # accounts", role names match by substring, and it comes first - so
+    # anything reaching for "Connect" gets the checklist and is taken back to
+    # the page it is already on. Three runs went that way before a highlight
+    # and a screenshot said so.
     dismiss_the_onboarding_checklist(page, journey)
 
-    # Named for the platform it connects, and a BUTTON - each card submits a
-    # form. Both facts came out of driving it: "Connect" alone named ten
-    # controls identically, which is the accessibility defect this flow
-    # uncovered, and the cards were never links at all.
-    # EXACTLY that name. Substring matching was fine while Facebook was the
-    # only row; with the whole board in play "Connect Instagram" also names
-    # "Connect Instagram (Direct)", and "Connect LinkedIn (Personal Profile)"
-    # is only distinguishable from the Company Page card by the whole string.
-    # Playwright refuses an ambiguous locator rather than picking one, which is
-    # how this surfaced. exact=True is possible ONLY because each card carries
-    # an aria-label naming its platform - without it every card is "Connect".
+    # EXACTLY that name. With the whole board in play "Connect Instagram" also
+    # names "Connect Instagram (Direct)", and the two LinkedIn cards differ
+    # only by their whole string. Playwright refuses an ambiguous locator
+    # rather than picking one. Naming the card at all is possible ONLY because
+    # each carries an aria-label - without it every card announces "Connect".
     connect = page.get_by_role("button", name=f"Connect {spec['card']}", exact=True)
     connect.highlight()
     journey(page, "the-control-about-to-be-clicked")
@@ -629,32 +581,203 @@ def test_a_person_can_install_a_provider(platform, live_server, page, journey, p
     page.wait_for_load_state("networkidle")
     journey(page, "after-pressing-connect")
 
-    assert endpoints.unexpected == [], f"unpredicted platform calls: {endpoints.unexpected}"
-
-    # THE BROWSER WENT TO THE PLATFORM, carrying what the platform needs to
-    # recognise this deployment and get the person back again. Checked on the
-    # URL the application actually built, not on one this test composed.
-    assert endpoints.navigations, f"the browser was never sent to the platform.{endpoints.what_happened()}"
-    authorising = parse_qs(urlsplit(endpoints.navigations[0]).query)
-    assert authorising["redirect_uri"][0].startswith(live_server.url), (
-        f"the platform was told to send the person to {authorising['redirect_uri'][0]}, not back to us"
-    )
-    assert authorising.get("state", [""])[0], "no state was carried, so the callback cannot be tied to this request"
-    assert authorising.get("client_id") or authorising.get("client_key"), (
-        "the authorisation request identified no application"
-    )
-
-    # NOT VACUOUS. "no unexpected calls" is trivially true when no call was
-    # made at all, which is exactly what the first version of this reported:
-    # it passed while the browser sat on the connect screen having done
-    # nothing. The flow is only real if the code was actually exchanged.
-    assert endpoints.exchanged_a_token(), (
-        f"the authorization code was never exchanged.{endpoints.what_happened()}\n  this tab is at: {page.url}"
-    )
-
     finish_installing(page, journey)
 
-    # INSTALLED, as the product itself reports it. Not a row read out of the
-    # database - the account has to be visible to the person who connected it.
-    expect(page.get_by_text(ACCOUNT_ON_THE_PLATFORM).first).to_be_visible()
-    journey(page, "the-account-is-installed")
+
+def open_the_composer(page, journey):
+    """Take a person from wherever they are to a blank post.
+
+    "New" opens a small menu offering "Post - Publish content to a channel"
+    and "Idea - Capture a content idea"; the picture is what said so.
+    """
+    start = page.get_by_role("button", name="New").or_(page.get_by_role("link", name="New")).first
+    start.click()
+    # The menu FADES IN, so a shot taken the instant after the click catches it
+    # half-drawn - which is how an earlier version concluded, wrongly, that
+    # pressing "New" did nothing at all.
+    page.wait_for_timeout(500)
+    journey(page, "the-new-menu")
+
+    # Named by the SENTENCE rather than the word "Post", because role names
+    # match by substring and the screen behind carries an "All Posts" filter -
+    # asking for "Post" is asking for both.
+    write_a_post = (
+        page.get_by_role("link", name="Publish content to a channel")
+        .or_(page.get_by_role("button", name="Publish content to a channel"))
+        .first
+    )
+    write_a_post.click()
+    page.wait_for_load_state("networkidle")
+    journey(page, "the-composer")
+
+
+def choose_the_channel(page, journey):
+    """Tick the connected channel, which no post can skip.
+
+    ACCESSIBILITY FINDING, and this is how it was found. Asking for the
+    tick-box by the channel's name timed out; asking for tick-boxes AT ALL
+    answers ZERO. The square drawn beside the channel is not a checkbox: it
+    has no checkbox role, so nothing exposes whether it is ticked, and it
+    carries no accessible name either.
+
+    That is not cosmetic. Choosing a channel is the one step no post can skip,
+    so as it stands a person using a screen reader cannot publish at all.
+
+    Until the product names it, this presses what a sighted person presses:
+    the pill itself, scoped to the MAIN landmark because the sidebar lists the
+    same channel by the same name. A landmark is what the page offers for
+    exactly this; it is not reaching into the DOM for a structure.
+    """
+    channel = page.get_by_role("main").get_by_text(ACCOUNT_ON_THE_PLATFORM, exact=True).first
+    channel.highlight()
+    journey(page, "the-channel-about-to-be-chosen")
+
+    channel.click()
+    journey(page, "the-channel-is-chosen")
+
+
+class TestOneProviderAllTheWay:
+    """One provider, one person, one session - from sign-up to published.
+
+    SERIAL BY CONSTRUCTION. The steps below run in the order they are written
+    and share everything: the browser, the account, the connected channel and
+    the recorder at the platform boundary. Each step therefore tests its own
+    subject instead of re-testing the preamble, and the filmstrip in
+    .e2e-screens/<provider>/ reads as one continuous story rather than a dozen
+    restarts.
+
+    It also means an early failure fails what follows, which is honest: a
+    person who cannot connect a channel cannot publish either.
+
+    THE NUMBERS IN THE NAMES ARE LOAD-BEARING. Tests are collected in NAME
+    order, not in the order they are written, and this suite was written
+    assuming otherwise: the step that connects the channel sorted ahead of the
+    step that navigates to the connect screen, so it hunted for a platform
+    card on the publishing queue and waited thirty seconds for one. The
+    screenshot of that moment shows the Publish page with the onboarding panel
+    still open, which is what said so.
+
+    Two digits, because the feature steps to come will pass nine.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def _every_step_declares_the_same_context(self, live_server, a_page, a_journey, endpoints, spec):
+        """Give every step an IDENTICAL set of fixtures, so none can be moved.
+
+        Numbering the steps was not enough on its own, and the collection
+        order said so: 01, 03, 02, 04. pytest reorders items to group the ones
+        that share higher-scoped fixtures, and the steps did not share them -
+        two asked for `live_server` and `endpoints`, two did not, and the odd
+        ones out were shuffled past their neighbours.
+
+        An autouse fixture is added to EVERY step's fixture set, so after this
+        there is no difference left to sort on and the numbers decide.
+        """
+
+    def test_01_a_person_signs_up(self, live_server, a_page, a_journey, spec):
+        """Sign up, and look at whatever the product does next.
+
+        Where this lands decides everything after it: signing up turns out to
+        create the organization AND a workspace and to land on the publishing
+        queue, so no fixture has to invent them.
+        """
+        sign_up(a_page, live_server, a_journey, f"e2e-{spec['platform']}@brightbean.test")
+
+        assert live_server.url in a_page.url
+        assert "Create your account" not in a_page.content(), (
+            "still on the sign-up form after submitting it - the account was not created"
+        )
+
+    def test_02_is_offered_somewhere_to_publish(self, a_page, a_journey):
+        """An account with no channels offers its own way out.
+
+        A LINK, not a button, despite looking like one - addressed as the role
+        it actually has, because Playwright's role selector is strict and the
+        first attempt at this waited for a button that is not there.
+        """
+        a_page.get_by_role("link", name="Connect a Channel").click()
+        a_page.wait_for_load_state("networkidle")
+        a_journey(a_page, "connect-a-platform")
+
+        assert a_page.get_by_role("button", name="Connect").count() > 0, (
+            "the connect screen offers nothing to connect - every platform is "
+            "probably rendered disabled because this deployment holds no app "
+            "credentials for any of them"
+        )
+
+    def test_03_connects_the_channel(self, live_server, a_page, a_journey, endpoints, spec):
+        """Install this provider, against its own endpoints.
+
+        The properties asserted hold for every OAuth provider, and each can
+        fail silently in production: the browser is sent to THE PLATFORM'S OWN
+        authorisation page carrying this deployment's client id, a
+        redirect_uri pointing back at us and a state; and the code that comes
+        back is EXCHANGED.
+        """
+        connect_the_channel(a_page, a_journey, spec)
+
+        assert endpoints.unexpected == [], f"unpredicted platform calls: {endpoints.unexpected}"
+
+        assert endpoints.navigations, f"the browser was never sent to the platform.{endpoints.what_happened()}"
+        authorising = parse_qs(urlsplit(endpoints.navigations[0]).query)
+        assert authorising["redirect_uri"][0].startswith(live_server.url), (
+            f"the platform was told to send the person to {authorising['redirect_uri'][0]}, not back to us"
+        )
+        assert authorising.get("state", [""])[0], "no state was carried, so the callback cannot be tied to this request"
+        assert authorising.get("client_id") or authorising.get("client_key"), (
+            "the authorisation request identified no application"
+        )
+
+        # NOT VACUOUS. "no unexpected calls" is trivially true when no call was
+        # made at all, which is exactly what the first version of this
+        # reported: it passed while the browser sat doing nothing.
+        assert endpoints.exchanged_a_token(), (
+            f"the authorization code was never exchanged.{endpoints.what_happened()}"
+            f"\n  this tab is at: {a_page.url}"
+        )
+
+        # INSTALLED, as the product itself reports it - not a row read out of
+        # the database.
+        expect(a_page.get_by_text(ACCOUNT_ON_THE_PLATFORM).first).to_be_visible()
+        a_journey(a_page, "the-channel-is-installed")
+
+    def test_04_writes_a_text_post_and_queues_it(self, a_page, a_journey):
+        """The first feature: a plain text post, written and queued."""
+        open_the_composer(a_page, a_journey)
+        choose_the_channel(a_page, a_journey)
+
+        a_page.get_by_placeholder("What would you like to share?").fill(A_POST_ABOUT_COFFEE)
+        a_journey(a_page, "the-post-is-written")
+
+        # CHOOSING A CHANNEL CHANGES THE SCREEN, which the pictures show: the
+        # counter becomes the platform's own caption limit, a "Customize"
+        # control and a FIRST COMMENT field appear, the preview reports "1
+        # platform", and "Add to Queue" goes from pale to solid.
+        #
+        # That last one is asserted rather than admired: Playwright will not
+        # click a disabled control, so requiring it to be enabled states the
+        # rule the product enforces instead of hoping the click lands.
+        queue_it = a_page.get_by_role("button", name="Add to Queue")
+        expect(queue_it).to_be_enabled()
+        queue_it.click()
+
+        # WAIT FOR THE COMPOSER TO LEAVE before looking for the post.
+        #
+        # This step was GREEN while queueing nothing. Queueing is a round trip
+        # followed by a navigation to the calendar, and the screenshot taken
+        # straight after the click showed the composer still sitting there
+        # saying "Not saved yet", the channel count still 0 - while the
+        # assertion below passed anyway, because the words it looks for were
+        # still in the CAPTION BOX. An assertion that the subject of the test
+        # cannot falsify is not an assertion.
+        expect(queue_it).to_have_count(0)
+        a_page.wait_for_load_state("networkidle")
+        a_journey(a_page, "the-post-is-queued")
+
+        # QUEUED, as the product shows it: the press answers 204 and lands on
+        # the calendar, where the post is a chip on the next available slot
+        # carrying the opening words and the channel's badge.
+        #
+        # Matched on the opening words because the chip TRUNCATES - asserting
+        # the whole sentence would fail against a product behaving correctly.
+        expect(a_page.get_by_role("main").get_by_text(THE_OPENING_WORDS).first).to_be_visible()

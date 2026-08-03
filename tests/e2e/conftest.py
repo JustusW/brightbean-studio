@@ -402,6 +402,22 @@ def browser_context_args(browser_context_args):
 SCREENS = Path(__file__).resolve().parents[2] / ".e2e-screens"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def only_this_run_leaves_pictures():
+    """Empty the screenshot directory once, before anything photographs itself.
+
+    A run is ASSESSED from these pictures, so anything left over from an
+    earlier run is not merely clutter - it is evidence for something that did
+    not happen. A suite that was interrupted, or a provider that has since
+    been renamed, leaves a directory that looks exactly like a result.
+
+    Each journey clears its own directory too, but only its own; that cannot
+    remove what nothing in this run is going to write.
+    """
+    shutil.rmtree(SCREENS, ignore_errors=True)
+    SCREENS.mkdir(parents=True, exist_ok=True)
+
+
 @pytest.fixture
 def journey(request):
     """Leave the test's path as numbered, full-page screenshots.
@@ -417,6 +433,97 @@ def journey(request):
     else - no leftovers from an earlier attempt to mistake for this one.
     """
     directory = SCREENS / re.sub(r"[^\w.-]+", "-", request.node.name)
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True, exist_ok=True)
+    step = itertools.count(1)
+
+    def look(page, name):
+        path = directory / f"{next(step):02d}-{name}.png"
+        page.screenshot(path=str(path), full_page=True)
+        return path
+
+    return look
+
+
+@pytest.fixture(scope="session", autouse=True)
+def the_database_is_open_for_the_whole_run(django_db_setup, django_db_blocker):
+    """Open the database once, for the entire session, and never reset it.
+
+    The serial suites here are continuous sessions: a person signs up, connects
+    a channel and then writes several posts, and each step relies on what the
+    last one did. Nothing may truncate between them.
+
+    Each suite keeps out of the others' way by using a different address, and
+    the database itself is created and dropped per run, so nothing survives.
+    """
+    with django_db_blocker.unblock():
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _live_server_helper():
+    """Override pytest-django's fixture of this name, WHICH FLUSHES THE DATABASE.
+
+    THIS IS WHAT KEPT SIGNING THE PERSON OUT, and it took far too long to find
+    because it was never written down here. pytest-django ships a
+    function-scoped autouse fixture called `_live_server_helper` whose own
+    docstring says it "will dynamically request the transactional_db fixture
+    for a test which uses the live_server fixture" - and `transactional_db`
+    re-initialises the database for every test.
+
+    So merely MENTIONING live_server anywhere in a test's fixture closure
+    silently turns on a truncation after that test. The serial suite signed up
+    in its first step, had every table emptied underneath it, and met
+    /accounts/login/ in its second - reported as a missing "Connect" button,
+    which is nothing like the truth.
+
+    Replacing it with a no-op takes the database back into this conftest's
+    hands, where `the_database_is_open_for_the_whole_run` above keeps it open
+    and untouched. The only other thing the original did was enable
+    live_server's modified settings, which exist to admit the server's host -
+    and config/settings/e2e.py already sets ALLOWED_HOSTS = ["*"].
+    """
+
+
+@pytest.fixture(scope="class")
+def a_page(browser, spec):
+    """ONE browser session for a whole serial suite, not one per test.
+
+    IT DEPENDS ON `spec` AND MUST. `spec` is a parametrized class-scoped
+    fixture, and pytest reorders tests to keep each parameter's tests
+    together. A step that did NOT reach `spec` fell outside that grouping and
+    was run after the others - which tore this fixture down and built it
+    again, handing that step a FRESH CONTEXT with no session cookie. The
+    person was silently signed out, and the screenshot showed the application
+    with a "Welcome back" login form boosted in underneath it.
+
+    Depending on `spec` here puts every test that touches the browser into the
+    same group, so the steps run in the order they are written.
+
+    The suite in test_compose_and_publish.py is a single continuous session
+    per provider: a person signs up, connects a channel and then writes
+    several posts, and each step leaves the next one somewhere to start. A
+    fresh page per test would throw that away and force every step to redo the
+    preamble - at which point each step is mostly testing the preamble.
+    """
+    context = browser.new_context(viewport={"width": 1280, "height": 2000})
+    page = context.new_page()
+    yield page
+    context.close()
+
+
+@pytest.fixture(scope="class")
+def a_journey(spec):
+    """One numbered filmstrip per provider, in the order the steps happened.
+
+    `journey` above gives each TEST its own directory, which is right for
+    tests that stand alone. A serial suite is one story, so it gets one
+    directory and the numbering runs across the whole of it - which is also
+    what makes it readable afterwards.
+
+    `spec` is supplied by the suite being run and names the provider.
+    """
+    directory = SCREENS / spec["platform"]
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True, exist_ok=True)
     step = itertools.count(1)
