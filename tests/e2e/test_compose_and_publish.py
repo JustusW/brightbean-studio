@@ -145,11 +145,24 @@ class PlatformEndpoints:
     def __init__(self, routes):
         self.routes = routes
         self.requests: list[httpx.Request] = []
+        self.sent: list[bytes] = []
         self.navigations: list[str] = []
         self.unexpected: list[str] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+
+        # READ THE BODY NOW, while it is still there. Asking a request for its
+        # content AFTER the transport has dealt with it can answer empty, and
+        # that is not hypothetical: LinkedIn's image upload PUTs the file's
+        # bytes, the recorder held the request object, and a later check for a
+        # PNG signature found nothing - reporting "the platform was never
+        # given the picture" about the one provider that had uploaded the
+        # whole file.
+        try:
+            self.sent.append(request.content)
+        except Exception:
+            self.sent.append(b"")
         for suffix, responder in self.routes.items():
             if request.url.path.endswith(suffix):
                 return responder(request)
@@ -405,6 +418,17 @@ OAUTH_PLATFORMS = {
         "card": "Instagram",
         "endpoints": {
             "/oauth/access_token": A_TOKEN,
+            # Instagram publishes in two moves: a container carrying the
+            # image, then a publish of that container. The longer suffix comes
+            # first because a suffix match takes the first route that fits, and
+            # the container is polled for status until it says FINISHED.
+            "/media_publish": answers({"id": "17900000000000001"}),
+            "/media": answers({"id": "17800000000000001", "status_code": "FINISHED"}),
+            # And the container is then POLLED BY ITS OWN ID until it reports
+            # FINISHED - Instagram ingests media asynchronously, so publishing
+            # before that returns "media not found". The id below is the one
+            # answered above, which is why this route can be written at all.
+            "/17800000000000001": answers({"status_code": "FINISHED", "status": "Finished"}),
             "/me/accounts": answers(
                 {
                     "data": [
@@ -459,6 +483,12 @@ OAUTH_PLATFORMS = {
             "/rest/posts": lambda request: httpx.Response(
                 201, json={}, headers={"x-restli-id": "urn:li:share:7000000000000000000"}
             ),
+            # A PICTURE ON LINKEDIN IS THREE MOVES: ask where to put it, PUT
+            # the bytes there, then create a post referring to it by URN.
+            "/rest/images": answers(
+                {"value": {"uploadUrl": "https://api.linkedin.com/mediaUpload/e2e", "image": "urn:li:image:e2e"}}
+            ),
+            "/mediaUpload/e2e": answers({}),
             # OIDC mode, which is what a dev app without Community Management
             # approval gets: the profile comes from the userinfo claims.
             "/v2/userinfo": answers({"sub": "e2e-member", "name": ACCOUNT_ON_THE_PLATFORM, "picture": ""}),
@@ -527,6 +557,13 @@ OAUTH_PLATFORMS = {
         "card": "Pinterest",
         "endpoints": {
             "/oauth/token": A_TOKEN,
+            # THE COMPOSER ASKS FOR BOARDS as soon as a Pinterest channel has
+            # a picture on it - a pin has to go somewhere. Unanswered, the
+            # provider raised and our own server handed the browser a 502,
+            # which is how this surfaced: as a refusal on the page, not as a
+            # platform call.
+            "/boards": answers({"items": [{"id": "e2e-board-1", "name": "Coffee"}]}),
+            "/pins": answers({"id": "e2e-pin-1"}),
             "/user_account": answers(
                 {
                     "id": "e2e-pinner",
@@ -548,6 +585,10 @@ OAUTH_PLATFORMS = {
             # suffix match takes the first route that fits.
             "/threads_publish": answers({"id": "e2e-thread-1"}),
             "/threads": answers({"id": "e2e-container-1", "status": "FINISHED"}),
+            # A media container is polled by its own id until it says FINISHED,
+            # exactly as Instagram's is - Threads ingests pictures and video
+            # asynchronously and refuses to publish one that is not ready.
+            "/e2e-container-1": answers({"status": "FINISHED", "error_message": ""}),
             "/me": answers(
                 {
                     "id": "e2e-threads-user",
@@ -623,6 +664,16 @@ OAUTH_PLATFORMS = {
 #: what is built, and naming it in the harness is the honest place to record
 #: it until somebody decides whether to close it.
 NEEDS_MEDIA = {"instagram", "instagram_login", "pinterest", "tiktok", "youtube"}
+
+#: And of those, the ones a PICTURE does not satisfy either. TikTok and
+#: YouTube take video, so an image post is refused just as a text one was -
+#: their video journeys are the step after this. Pinterest takes an image but
+#: also insists on a board to pin it to, chosen from the boards its API
+#: reports, and nothing in this suite chooses one yet.
+#:
+#: Each name here is a feature NOT yet covered, which is the point of writing
+#: them down instead of quietly passing.
+A_PICTURE_IS_NOT_ENOUGH = {"pinterest", "tiktok", "youtube"}
 
 
 @pytest.fixture(scope="class", params=sorted(OAUTH_PLATFORMS))
@@ -1106,6 +1157,8 @@ class TestOneProviderAllTheWay:
         assert refused == [], f"the browser was refused: {refused}"
         assert a_page.evaluate("window.__cspViolations || []") == [], "the policy blocked something on this page"
 
+        a_journey(a_page, "the-post-with-a-picture-is-ready")
+
         # STILL TO SETTLE, and recorded rather than glossed: the thumbnail is
         # drawn as a broken image in both the composer and the preview, while
         # the very same URL fetched from this browser answers 200 image/png.
@@ -1113,3 +1166,65 @@ class TestOneProviderAllTheWay:
         # no request failed - and the page still cannot show it. That is worth
         # its own look; it is not the subject of this step, which is whether a
         # person can attach a picture at all.
+
+    def test_07_publishes_the_picture_to_the_platform(self, a_page, a_journey, endpoints, spec):
+        """Send the picture out, and check the platform was given one.
+
+        This is what the media-first platforms exist for, and it is a
+        different assertion from the text post: the request that leaves has to
+        carry a URL for the FILE, not just words. Instagram in particular
+        publishes in two moves - a container carrying the image, then a
+        publish of that container - so a run that only reached the first would
+        look successful and post nothing.
+        """
+        if spec["platform"] in A_PICTURE_IS_NOT_ENOUGH:
+            pytest.skip(
+                f"{spec['card']} will not publish a picture on its own - TikTok and YouTube want video, "
+                "Pinterest wants a board to pin it to. Those are the next feature steps."
+            )
+
+        when = a_page.get_by_role("button", name="Next available")
+        when.click()
+        a_page.wait_for_timeout(500)
+        a_page.get_by_text("Publish immediately").click()
+        a_page.wait_for_timeout(500)
+        a_journey(a_page, "the-picture-post-set-to-publish-now")
+
+        publish = a_page.get_by_role("button", name="Publish Now")
+        expect(publish).to_be_enabled()
+        publish.click()
+        expect(publish).to_have_count(0)
+        a_page.wait_for_load_state("networkidle")
+
+        call_command("run_publisher", once=True)
+        connections.close_all()
+
+        a_page.reload()
+        a_page.wait_for_load_state("networkidle")
+        a_journey(a_page, "the-picture-post-was-published")
+
+        # THE FILE'S OWN NAME had to travel. The caption could reach a platform
+        # with no picture attached at all; the uploaded file's name in the
+        # request is what says the picture went with it.
+        # TWO WAYS TO HAND A PLATFORM A PICTURE, and this has to accept both.
+        # Facebook and Instagram are given a URL to fetch, so the file's name
+        # appears in the request. LinkedIn is given the BYTES: it asks where to
+        # put them, PUTs them there and then refers to the result by URN, so
+        # the name appears nowhere at all and a check for it reported "the
+        # platform was never given the picture" about a publish that had just
+        # uploaded the entire file.
+        carried_the_picture = [
+            f"{request.method} {request.url}"
+            for request, sent in zip(endpoints.requests, endpoints.sent, strict=False)
+            if AN_IMAGE.stem in unquote_plus(sent.decode(errors="replace") + str(request.url))
+            or sent.startswith(b"\x89PNG")
+        ]
+        assert carried_the_picture, (
+            "the platform was never given the picture."
+            f"{endpoints.what_happened()}"
+            f"\n  bodies seen: {[(str(r.url)[-40:], len(s), s[:8]) for r, s in zip(endpoints.requests, endpoints.sent, strict=False)]}"
+        )
+
+        assert endpoints.unexpected == [], (
+            f"the application called endpoints this test does not answer, so the publish failed: {endpoints.unexpected}"
+        )
