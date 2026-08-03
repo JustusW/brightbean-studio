@@ -360,6 +360,7 @@ AN_ARTICLE_NOBODY_TITLED = "A thought I have not titled yet."
 #: whether they like it, which is the point of handing them a real file.
 AN_IMAGE = Path(tempfile.gettempdir()) / "brightbean-e2e-latte.png"
 
+
 def an_image_on_disk():
     """A file for the OS file-picker to hand over, as a person would.
 
@@ -384,6 +385,30 @@ def an_image_on_disk():
     return str(AN_IMAGE)
 
 
+#: The video, for the two platforms that take nothing else. Encoded on every
+#: run for the same reason the picture is drawn on every run.
+A_VIDEO = Path(tempfile.gettempdir()) / "brightbean-e2e-tone.mp4"
+
+
+def a_video_on_disk():
+    """A real MP4 - a flat colour and a sine tone - to hand to the picker."""
+    from tests.e2e.make_test_video import make_test_video
+
+    return make_test_video(A_VIDEO)
+
+
+def what_this_platform_takes(spec):
+    """The file a person would attach here, and how the browser should name it.
+
+    Returns (path, mime type). TikTok and YouTube take video and refuse a
+    picture as flatly as they refuse a text post; everybody else takes the
+    picture.
+    """
+    if spec["platform"] in WANTS_VIDEO:
+        return a_video_on_disk(), "video/mp4"
+    return an_image_on_disk(), "image/png"
+
+
 def finish_installing(page, journey):
     """Complete the installation on whatever the platform's return lands on.
 
@@ -404,6 +429,27 @@ def finish_installing(page, journey):
 
     choose.click()
     page.wait_for_load_state("networkidle")
+
+
+def a_resumable_upload(session_uri, created):
+    """Answer Google's two-step resumable upload, which shares ONE path.
+
+    Source: developers.google.com, YouTube Data API > Resumable Uploads.
+    Step 1 is a POST carrying the video resource and the X-Upload-Content-*
+    headers; it answers 200 with an empty body and the session URI in the
+    LOCATION HEADER. Step 3 PUTs the file's bytes to that URI and answers 201
+    with the created video resource.
+
+    Both requests have the same path, so the two are told apart by method -
+    which is also why this cannot be written as a plain answers() row.
+    """
+
+    def responder(request):
+        if request.method == "POST":
+            return httpx.Response(200, headers={"Location": session_uri, "Content-Length": "0"}, content=b"")
+        return httpx.Response(201, json=created)
+
+    return responder
 
 
 def headers_of(request):
@@ -576,12 +622,70 @@ PLATFORMS = {
                     }
                 }
             ),
+            # PUBLISHING A VIDEO, and this pair is the first thing in this
+            # file taken from a PLATFORM'S OWN REFERENCE rather than from
+            # watching our code and answering whatever it asked for. Source:
+            # developers.tiktok.com, Content Posting API > API Reference >
+            # Video > Direct Post, sections "Response" and "Send Video to
+            # TikTok Servers"; photographed into .api-reference/ by
+            # tests/e2e/read_the_docs.py so it can be checked rather than
+            # taken on trust.
+            #
+            # The documented envelope is data{publish_id, upload_url} beside
+            # error{code, message, log_id}, where any code but "ok" is a
+            # failure and upload_url is present ONLY for source=FILE_UPLOAD.
+            # publish_id follows the documented "v_pub_file~v2-1.<digits>"
+            # shape, which our provider's analytics path parses.
+            #
+            # DOCUMENTED INCONSISTENCY, left as TikTok has it: the field table
+            # names the third error field "logid", the worked example calls it
+            # "log_id". The example is followed here.
+            "/post/publish/video/init/": answers(
+                {
+                    "data": {
+                        "publish_id": "v_pub_file~v2-1.123456789",
+                        # A SECOND DOCUMENTED INCONSISTENCY: this section's own
+                        # example returns ".../video/?upload_id=...", while the
+                        # upload example a page later PUTs to
+                        # ".../upload/?upload_id=...". The upload example wins
+                        # here, being the one that describes the request.
+                        "upload_url": "https://open-upload.tiktokapis.com/upload/?upload_id=e2e&upload_token=e2e",
+                    },
+                    "error": {"code": "ok", "message": "", "log_id": "e2e-tiktok-log"},
+                }
+            ),
+            # And the video itself is PUT to the whole of that URL, query
+            # string included - the reference says so twice, in the table
+            # ("HTTP URL: Returned in upload_url", "HTTP Method: PUT") and in
+            # a note warning not to drop the query parameters.
+            "/upload/": answers({}),
         },
     },
     "youtube": {
         "card": "YouTube",
         "endpoints": {
             "/token": A_TOKEN,
+            # UPLOADING A VIDEO, from Google's own reference rather than from
+            # watching our code: developers.google.com, YouTube Data API >
+            # Resumable Uploads, steps 1 to 4. Photographed and extracted into
+            # .api-reference/ by tests/e2e/read_the_docs.py.
+            #
+            # The session URI Google's example returns is the same path again
+            # with an upload_id, so step 1 and step 3 are indistinguishable by
+            # path and are answered by method - see a_resumable_upload.
+            "/upload/youtube/v3/videos": a_resumable_upload(
+                "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&upload_id=e2e",
+                {
+                    "kind": "youtube#video",
+                    "id": "e2e-video-id",
+                    "snippet": {
+                        "title": A_POST_WITH_A_PICTURE,
+                        "description": A_POST_WITH_A_PICTURE,
+                        "categoryId": "22",
+                    },
+                    "status": {"privacyStatus": "public", "embeddable": True, "license": "youtube"},
+                },
+            ),
             "/channels": answers(
                 {
                     "items": [
@@ -861,15 +965,17 @@ PLATFORMS = {
 #: it until somebody decides whether to close it.
 NEEDS_MEDIA = {"instagram", "instagram_login", "pinterest", "tiktok", "youtube"}
 
-#: And of those, the ones a PICTURE does not satisfy either. TikTok and
-#: YouTube take video, so an image post is refused just as a text one was -
-#: their video journeys are the step after this. Pinterest takes an image but
-#: also insists on a board to pin it to, chosen from the boards its API
-#: reports, and nothing in this suite chooses one yet.
+#: And of those, the ones that take VIDEO and nothing else. A picture is
+#: refused by these two exactly as a text post was, so the suite makes them a
+#: video instead - see tests/e2e/make_test_video.py, which encodes one rather
+#: than committing a binary nobody can read in a diff.
 #:
-#: Each name here is a feature NOT yet covered, which is the point of writing
-#: them down instead of quietly passing.
-A_PICTURE_IS_NOT_ENOUGH = {"pinterest", "tiktok", "youtube"}
+#: Pinterest used to be listed here on the assumption that a pin needs more
+#: than a picture. It does not: the board the composer already asks for is
+#: enough, and taking Pinterest out of this set made its publish step pass
+#: with no other change. An assumption in a skip list is a feature nobody is
+#: testing.
+WANTS_VIDEO = {"tiktok", "youtube"}
 
 
 @pytest.fixture(scope="class", params=sorted(PLATFORMS))
@@ -1047,6 +1153,36 @@ def settle_what_the_platform_insists_on(page, journey, spec):
     page.get_by_role("main").get_by_text("Everyone", exact=True).first.click()
     page.wait_for_timeout(500)
     journey(page, "the-tiktok-audience-is-chosen")
+
+
+def let_the_worker_run(endpoints, platform, ticks=5):
+    """Poll the publishing worker the way a deployment polls it: repeatedly.
+
+    `run_publisher --once` is ONE tick, and a tick takes at most
+    MAX_CONCURRENT_PUBLISHES posts, OLDEST FIRST. This suite deliberately
+    shares one database across all thirteen platforms, so by the time the last
+    one publishes there can be older due posts ahead of it - and the post just
+    written, being the newest, is the one that falls off the end.
+
+    That is the harness being unlike a deployment, which polls every fifteen
+    seconds and drains the backlog, not the product refusing to publish. It
+    showed up as YouTube - last alphabetically - passing on its own and
+    failing in the full run, with the recorder showing the platform never
+    called at all.
+
+    Stops as soon as THIS platform's own endpoints have been called, so a
+    healthy publish still costs exactly one tick.
+    """
+    for _ in range(ticks):
+        before = endpoints.answered_by.count(platform)
+        call_command("run_publisher", once=True)
+        # HAND THE WORKER'S CONNECTIONS BACK after every tick: the engine
+        # publishes on a thread pool, and Django closes those connections only
+        # when the thread's storage is collected - far too late to drop a
+        # database at the end of the run.
+        connections.close_all()
+        if endpoints.answered_by.count(platform) > before:
+            return
 
 
 def write_the_post(page, journey, spec, words):
@@ -1325,15 +1461,7 @@ class TestOneProviderAllTheWay:
         # `run_publisher --once` is the product's own worker running a single
         # poll cycle: the same entry point a deployment runs, not a reach into
         # the engine.
-        call_command("run_publisher", once=True)
-
-        # HAND THE WORKER'S CONNECTIONS BACK. The engine publishes on a thread
-        # pool and this call opens a connection of its own; Django closes them
-        # when the thread's storage is collected, which is far too late. Left
-        # alone, the session survives the test and dropping the database fails
-        # with "1 andere Sitzung verwendet die Datenbank" - reported as a
-        # PytestWarning, which is an error wearing a smaller hat.
-        connections.close_all()
+        let_the_worker_run(endpoints, spec["platform"])
 
         a_page.reload()
         a_page.wait_for_load_state("networkidle")
@@ -1353,10 +1481,7 @@ class TestOneProviderAllTheWay:
             for request in endpoints.requests
             if A_POST_TO_PUBLISH_NOW[:11] in unquote_plus(endpoints.body_of(request))
         ]
-        assert went_out, (
-            "nothing carrying the post's text ever reached the platform."
-            f"{endpoints.what_happened()}"
-        )
+        assert went_out, f"nothing carrying the post's text ever reached the platform.{endpoints.what_happened()}"
 
         # AND THE PLATFORM ANSWERED IT. `went_out` records what the
         # application SENT, including requests the recorder refused because
@@ -1450,6 +1575,13 @@ class TestOneProviderAllTheWay:
         """
         open_the_composer(a_page, a_journey)
         choose_the_channel(a_page, a_journey, spec)
+
+        # THE WORDS GO IN FIRST, which is the order a person works in and the
+        # order that finds defects. Typing starts the composer's autosave, and
+        # autosave is what creates the post - so an upload that follows can
+        # land in the window where the post already exists but the page has
+        # not yet been told, which is where media used to be lost for ever.
+        # Attaching first would avoid that window and prove nothing.
         write_the_post(a_page, a_journey, spec, A_POST_WITH_A_PICTURE)
 
         # WHAT THE BROWSER COULD NOT FETCH. The attachment appears and the
@@ -1486,11 +1618,12 @@ class TestOneProviderAllTheWay:
         # established is that this suite reported a broken thumbnail and an
         # empty upload as defects of the product, and they were defects of
         # this line.
+        attaching, its_type = what_this_platform_takes(spec)
         chosen.value.set_files(
             {
-                "name": AN_IMAGE.name,
-                "mimeType": "image/png",
-                "buffer": Path(an_image_on_disk()).read_bytes(),
+                "name": Path(attaching).name,
+                "mimeType": its_type,
+                "buffer": Path(attaching).read_bytes(),
             }
         )
 
@@ -1509,6 +1642,20 @@ class TestOneProviderAllTheWay:
         # the browser draws in place of a picture it could not load. An
         # assertion that holds only while something is broken is worse than
         # none: it would have started failing the day the thumbnail worked.
+        if spec["platform"] in WANTS_VIDEO:
+            # A VIDEO IS NOT AN <img>, and it is not enough that one is on the
+            # page either: videoWidth stays 0 until the browser has decoded a
+            # FRAME, so this is the same distinction the picture check makes
+            # between a file being there and a file being readable.
+            the_video = a_page.get_by_role("main").locator("video").first
+            the_video.wait_for(state="attached")
+            a_page.wait_for_timeout(1500)
+            assert the_video.evaluate("video => video.videoWidth") > 0, (
+                "the attached video never produced a frame - the browser was given nothing it could decode"
+            )
+            a_journey(a_page, "the-post-with-a-video-is-ready")
+            return
+
         assert a_page.get_by_role("main").get_by_role("img").count() >= 1, (
             "the post has no picture on it after attaching one"
         )
@@ -1545,12 +1692,6 @@ class TestOneProviderAllTheWay:
         publish of that container - so a run that only reached the first would
         look successful and post nothing.
         """
-        if spec["platform"] in A_PICTURE_IS_NOT_ENOUGH:
-            pytest.skip(
-                f"{spec['card']} will not publish a picture on its own - TikTok and YouTube want video, "
-                "Pinterest wants a board to pin it to. Those are the next feature steps."
-            )
-
         when = a_page.get_by_role("button", name="Next available")
         when.click()
         a_page.wait_for_timeout(500)
@@ -1564,12 +1705,25 @@ class TestOneProviderAllTheWay:
         expect(publish).to_have_count(0)
         a_page.wait_for_load_state("networkidle")
 
-        call_command("run_publisher", once=True)
-        connections.close_all()
+        let_the_worker_run(endpoints, spec["platform"])
 
         a_page.reload()
         a_page.wait_for_load_state("networkidle")
         a_journey(a_page, "the-picture-post-was-published")
+
+        # OPEN THE POST AND LOOK AT IT. The chip on the calendar is the
+        # product's own record of what it tried to send; opening it shows the
+        # channel, the title, and - the thing that decides this - whether any
+        # media is actually attached to the post the worker published. Reading
+        # that off the screen beats inferring it from an engine log.
+        the_post = a_page.get_by_role("main").get_by_role("link", name=re.compile(A_POST_WITH_A_PICTURE[:10])).first
+        if the_post.count():
+            the_post.click()
+            a_page.wait_for_load_state("networkidle")
+            a_page.wait_for_timeout(1500)
+            a_journey(a_page, "the-post-as-the-product-has-it")
+            a_page.go_back()
+            a_page.wait_for_load_state("networkidle")
 
         # THE FILE'S OWN NAME had to travel. The caption could reach a platform
         # with no picture attached at all; the uploaded file's name in the
@@ -1581,17 +1735,26 @@ class TestOneProviderAllTheWay:
         # the name appears nowhere at all and a check for it reported "the
         # platform was never given the picture" about a publish that had just
         # uploaded the entire file.
+        # WHAT THIS PLATFORM WAS SENT depends on what it takes: a picture for
+        # most, a video for the two that refuse pictures. Both are recognised
+        # the same two ways - by the file's name, which appears when the
+        # platform is handed a URL to fetch, and by the file's own signature,
+        # which appears when it is handed the bytes.
+        the_file = A_VIDEO if spec["platform"] in WANTS_VIDEO else AN_IMAGE
+        # PNG says so in its first four bytes; MP4 carries "ftyp" a few bytes
+        # in, so neither is looked for at any fixed position.
+        its_signature = b"ftyp" if spec["platform"] in WANTS_VIDEO else b"\x89PNG"
         carried_the_picture = [
             f"{request.method} {request.url}"
             for request, sent in zip(endpoints.requests, endpoints.sent, strict=False)
-            if AN_IMAGE.stem in unquote_plus(sent.decode(errors="replace") + str(request.url))
+            if the_file.stem in unquote_plus(sent.decode(errors="replace") + str(request.url))
             # ANYWHERE IN THE BODY, not only at its start. Mastodon is sent
             # the file as one part of a MULTIPART body, so the signature sits
             # a couple of hundred bytes in, behind the part's own headers -
             # and the name in those headers is the engine's temp file, not
             # ours, so neither the name nor the first four bytes match while
             # 2514 bytes of picture go up perfectly well.
-            or b"\x89PNG" in sent
+            or its_signature in sent
         ]
         assert carried_the_picture, (
             "the platform was never given the picture."

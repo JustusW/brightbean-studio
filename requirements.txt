@@ -55,6 +55,15 @@ pytest-django>=4.8,<5.0
 pytest-cov>=5.0,<6.0
 pytest-playwright>=0.5,<1.0
 factory-boy>=3.3,<4.0
+# An ffmpeg binary for the browser suite, which has to MAKE a video before it
+# can publish one: TikTok and YouTube take nothing else. The application
+# already shells out to ffmpeg for thumbnails, filmstrips and trimming
+# (apps/media_library/services.py), but that is a system binary nobody
+# installs on the CI runner - the workflow puts PostgreSQL and Chromium on it
+# by hand and stops there. This one arrives with the requirements, so the test
+# job needs no extra step. tests/e2e/make_test_video.py prefers the system
+# ffmpeg where there is one and falls back to this.
+imageio-ffmpeg>=0.5,<1.0
 
 # Monitoring
 sentry-sdk[django]>=2.13,<3.0
