@@ -18,7 +18,9 @@ The settings module is not optional. config/settings/e2e.py ENFORCES the
 Content Security Policy; config/settings/test.py only reports it.
 """
 
+import itertools
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -372,6 +374,39 @@ def django_db_modify_db_settings(ephemeral_postgres):
             "PORT": ephemeral_postgres["port"],
         }
     )
+
+
+#: Where a run leaves the pictures of itself. Inside the repository, because
+#: they have to be readable by whoever is reading the run; ignored by git,
+#: because they are regenerated every time and asserted against never.
+SCREENS = Path(__file__).resolve().parents[2] / ".e2e-screens"
+
+
+@pytest.fixture
+def journey(request):
+    """Leave the test's path as numbered, full-page screenshots.
+
+    EVERY browser test should call this at every step it takes. A run that
+    ends red tells you which assertion failed; the trail tells you what the
+    person driving the browser was actually looking at when it did - which is
+    the difference between a diagnosis and a guess about a page you cannot
+    reproduce.
+
+    Each test gets its own directory, emptied at the start of the test, so
+    what is on disk afterwards is that test's most recent run and nothing
+    else - no leftovers from an earlier attempt to mistake for this one.
+    """
+    directory = SCREENS / re.sub(r"[^\w.-]+", "-", request.node.name)
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True, exist_ok=True)
+    step = itertools.count(1)
+
+    def look(page, name):
+        path = directory / f"{next(step):02d}-{name}.png"
+        page.screenshot(path=str(path), full_page=True)
+        return path
+
+    return look
 
 
 @pytest.fixture
