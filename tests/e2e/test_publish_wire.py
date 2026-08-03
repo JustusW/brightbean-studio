@@ -580,3 +580,108 @@ def test_instagram_creates_a_container_waits_for_it_then_publishes_it(wire):
     assert json.loads(published.content) == {"creation_id": INSTAGRAM_CONTAINER_ID}, (
         "the published creation_id is not the container that was just created"
     )
+
+
+# ---------------------------------------------------------------------------
+# TikTok - https://developers.tiktok.com/doc/content-posting-api-reference-direct-post
+# ---------------------------------------------------------------------------
+
+TIKTOK_OPEN_ID = "e2e-open-id"
+TIKTOK_PUBLISH_ID = "v_pub_file~e2e-publish-handle"
+TIKTOK_UPLOAD_URL = "https://open-upload.tiktokapis.com/upload/v2/e2e-upload"
+TIKTOK_TOKEN = "tiktok-user-access"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_tiktok_queries_creator_info_then_uploads_the_video_in_one_chunk(wire):
+    """TikTok's direct post is query -> init -> upload, and the ORDER is mandated.
+
+    "To initiate a direct post to a creator's account, you must first use the
+    Query Creator Info endpoint to get the target creator's latest
+    information" - the Content Posting API's own getting-started page. The
+    allowed privacy levels depend on the app's audit status and the creator's
+    settings, both of which change without notice, so the answer may not be
+    cached. This case asserts the query actually precedes the init.
+
+    The upload is FILE_UPLOAD rather than PULL_FROM_URL on purpose: PULL_FROM_URL
+    requires the source domain to be verified with TikTok, which a presigned
+    S3/R2 URL cannot satisfy. That means the SIZE ARITHMETIC is on us -
+    video_size, chunk_size, total_chunk_count and the Content-Range of the PUT
+    all have to agree with the bytes actually sent, and TikTok rejects the
+    upload if they do not.
+
+    What lands in platform_post_id is a PUBLISH HANDLE (`v_pub_file~...`), not
+    a video id. Analytics resolves it later via the publish-status endpoint.
+    Storing the wrong thing here breaks analytics only, and only days later.
+    """
+    recorder = wire(
+        {
+            "/v2/post/publish/creator_info/query/": lambda request: httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "creator_nickname": "brightbean",
+                        "privacy_level_options": ["PUBLIC_TO_EVERYONE", "SELF_ONLY"],
+                        "comment_disabled": False,
+                        "duet_disabled": False,
+                        "stitch_disabled": False,
+                        "max_video_post_duration_sec": 600,
+                    }
+                },
+            ),
+            "/v2/post/publish/video/init/": lambda request: httpx.Response(
+                200,
+                json={"data": {"publish_id": TIKTOK_PUBLISH_ID, "upload_url": TIKTOK_UPLOAD_URL}},
+            ),
+            "/upload/v2/e2e-upload": lambda request: httpx.Response(201),
+            # NOT publishing. The health check reads the profile, and analytics
+            # tries to resolve the publish handle to a video id - answering
+            # "still processing" is the honest response for a post this new.
+            "/v2/user/info/": lambda request: httpx.Response(
+                200,
+                json={"data": {"user": {"open_id": TIKTOK_OPEN_ID, "display_name": "Brightbean"}}},
+            ),
+            "/v2/post/publish/status/fetch/": lambda request: httpx.Response(
+                200,
+                json={"data": {"status": "PROCESSING_UPLOAD"}},
+            ),
+        }
+    )
+    platform_post = schedule_a_post(
+        platform="tiktok",
+        platform_id=TIKTOK_OPEN_ID,
+        token=TIKTOK_TOKEN,
+    )
+    attach_a_video(platform_post.post)
+
+    run_the_worker()
+
+    assert recorder.unexpected == [], f"unpredicted API calls: {recorder.unexpected}"
+    # The publish HANDLE, not a video id. TikTok has not minted one yet.
+    assert_published(platform_post, TIKTOK_PUBLISH_ID)
+
+    paths = [request.url.path for request in recorder.requests]
+    assert paths.index("/v2/post/publish/creator_info/query/") < paths.index("/v2/post/publish/video/init/"), (
+        "posted without first querying creator info, which the API requires"
+    )
+
+    init = recorder.call("/v2/post/publish/video/init/")
+    assert init.headers["Authorization"] == f"Bearer {TIKTOK_TOKEN}"
+    body = json.loads(init.content)
+    assert body["post_info"]["title"] == CAPTION
+    # Sent explicitly. Omitted, TikTok rejects the request outright - privacy
+    # is not optional on a direct post.
+    assert body["post_info"]["privacy_level"] == "PUBLIC_TO_EVERYONE"
+
+    upload = recorder.call("/upload/v2/e2e-upload")
+    assert upload is not None, "the video bytes never left the process"
+    size = len(upload.content)
+    assert size > 0
+
+    source = body["source_info"]
+    assert source["source"] == "FILE_UPLOAD"
+    assert source["video_size"] == size, "the declared video_size is not the number of bytes uploaded"
+    assert source["chunk_size"] == size
+    assert source["total_chunk_count"] == 1
+    # A single chunk still has to declare its range, and TikTok checks it.
+    assert upload.headers["Content-Range"] == f"bytes 0-{size - 1}/{size}"
