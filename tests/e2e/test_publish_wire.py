@@ -637,6 +637,97 @@ def test_facebook_stages_each_photo_unpublished_then_attaches_them_to_one_post(w
     assert [r for r in recorder.requests if r.method == "DELETE"] == []
 
 
+FACEBOOK_VIDEO_ID = "video-1"
+FACEBOOK_PERMALINK = "https://www.facebook.com/brightbean/videos/video-1/"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_facebook_posts_a_video_and_resolves_its_feed_story(wire):
+    """A video goes to /{page-id}/videos, and its caption is `description`.
+
+    THE FIELD NAME CHANGES with the edge. A feed post carries `message`; the
+    videos edge carries `description`, and sending `message` there is accepted
+    and dropped - the video publishes with no caption at all.
+
+    The videos edge answers with a VIDEO id, which is not the id of the story
+    that appears in the feed. The provider follows up for `post_id` and
+    `permalink_url` so that analytics and the first comment address the story
+    rather than the video object. That follow-up is best-effort by design -
+    processing is asynchronous, so post_id may not exist yet - which is
+    exactly why it needs a test that says what SHOULD happen when it does.
+    """
+    publishing = {
+        f"/{FACEBOOK_PAGE_ID}/videos": lambda request: httpx.Response(200, json={"id": FACEBOOK_VIDEO_ID}),
+        f"/v25.0/{FACEBOOK_VIDEO_ID}": lambda request: httpx.Response(
+            200,
+            json={"post_id": f"{FACEBOOK_PAGE_ID}_{FACEBOOK_POST_ID}", "permalink_url": FACEBOOK_PERMALINK},
+        ),
+    }
+    recorder = wire({**publishing, **graph_side_traffic(FACEBOOK_POST_ID)})
+    platform_post = schedule_a_post(
+        platform="facebook",
+        platform_id=FACEBOOK_PAGE_ID,
+        token=FACEBOOK_TOKEN,
+    )
+    asset = attach_a_video(platform_post.post)
+
+    run_the_worker()
+
+    assert recorder.unexpected == [], f"unpredicted API calls: {recorder.unexpected}"
+    # The feed story's id, resolved from the video - NOT the video id.
+    assert_published(platform_post, FACEBOOK_POST_ID)
+
+    request = recorder.call("/videos")
+    assert request.url.path == f"/v25.0/{FACEBOOK_PAGE_ID}/videos"
+    body = json.loads(request.content)
+    assert body["file_url"].endswith(asset.file.url)
+    assert body["description"] == CAPTION, "the caption must be `description` on the videos edge, not `message`"
+    assert "message" not in body
+
+
+FACEBOOK_LINK_URL = "https://brightbean.xyz/blog/shipping"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_facebook_attaches_a_link_to_a_feed_post(wire):
+    """A link post is a feed post with `link` beside the message.
+
+    The link does NOT travel as part of the caption text - Graph takes it as
+    its own field and builds the preview card from it. Dropped, the post
+    still publishes and still reads sensibly; it just loses the card, the
+    click target and the attribution, and no status check can tell.
+
+    The value reaches the provider by a route worth pinning down: the composer
+    stores it in platform_extra, and the engine POPS it out of the extras and
+    onto PublishContent.link_url. A rename at either end silently produces a
+    plain text post.
+    """
+    publishing = {
+        f"/{FACEBOOK_PAGE_ID}/feed": lambda request: httpx.Response(
+            200,
+            json={"id": f"{FACEBOOK_PAGE_ID}_{FACEBOOK_POST_ID}"},
+        ),
+    }
+    recorder = wire({**publishing, **graph_side_traffic(FACEBOOK_POST_ID)})
+    platform_post = schedule_a_post(
+        platform="facebook",
+        platform_id=FACEBOOK_PAGE_ID,
+        token=FACEBOOK_TOKEN,
+        platform_extra={"link_url": FACEBOOK_LINK_URL},
+    )
+
+    run_the_worker()
+
+    assert recorder.unexpected == [], f"unpredicted API calls: {recorder.unexpected}"
+    assert_published(platform_post, FACEBOOK_POST_ID)
+
+    body = json.loads(recorder.call("/feed").content)
+    assert body == {"message": CAPTION, "link": FACEBOOK_LINK_URL}
+    # Belt and braces on the thing that actually breaks: link_url must not be
+    # left in the extras and shipped as an unknown field instead.
+    assert "link_url" not in body
+
+
 # ---------------------------------------------------------------------------
 # Instagram - https://developers.facebook.com/docs/instagram-platform/content-publishing
 # ---------------------------------------------------------------------------
