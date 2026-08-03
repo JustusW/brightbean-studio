@@ -508,6 +508,14 @@ def a_page(browser, spec):
     """
     context = browser.new_context(viewport={"width": 1280, "height": 2000})
     page = context.new_page()
+
+    # THE POLICY IS ENFORCED HERE, so the page can be refused things without
+    # any HTTP response to show for it - a blocked image simply never asks.
+    # This recorder is installed before the first byte, exactly as it is for
+    # the CSP tests, so any refusal is readable from window.__cspViolations
+    # instead of being invisible.
+    page.add_init_script(CSP_VIOLATION_RECORDER)
+
     yield page
     context.close()
 

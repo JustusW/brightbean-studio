@@ -89,3 +89,8 @@ RATELIMIT_ENABLE = False
 # by the django-ratelimit decorators used elsewhere in this codebase. Emptying
 # this dict turns those off. Both are set because both exist.
 ACCOUNT_RATE_LIMITS = {}
+
+# SERVE THE FILES PEOPLE UPLOAD, or no media feature can be seen at all.
+# tests/e2e/urls.py is the application's own URL configuration with one route
+# appended for MEDIA_URL; the reasoning is written out in full there.
+ROOT_URLCONF = "tests.e2e.urls"

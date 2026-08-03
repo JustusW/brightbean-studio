@@ -27,6 +27,8 @@ pick the control you can see. Do not guess a selector from the template.
 """
 
 import re
+import tempfile
+from pathlib import Path
 from urllib.parse import parse_qs, unquote_plus, urlsplit
 
 import httpx
@@ -319,6 +321,38 @@ THE_OPENING_WORDS = "Fresh beans"
 #: Distinct from the first so that finding it in a request to the platform
 #: cannot be satisfied by the queued one.
 A_POST_TO_PUBLISH_NOW = "Doors open at seven. The espresso machine is already warm."
+
+#: A post with a picture, for the platforms that will not take words alone.
+A_POST_WITH_A_PICTURE = "Latte art, first attempt of the morning."
+
+#: The picture itself. Written to a temp file rather than committed, because a
+#: binary in the repository is a thing nobody can read in a diff. It is a real
+#: PNG - the composer, the media library and the platform all get to decide
+#: whether they like it, which is the point of handing them a real file.
+AN_IMAGE = Path(tempfile.gettempdir()) / "brightbean-e2e-latte.png"
+
+def an_image_on_disk():
+    """A file for the OS file-picker to hand over, as a person would.
+
+    DRAWN, not pasted in as base64. The first version of this carried a
+    hand-assembled base64 blob, and the composer showed it as a broken image
+    in both the attachment strip and the preview - which looks exactly like a
+    product defect in thumbnailing and was nothing of the sort. Pillow is
+    already a dependency of this project, so a genuinely valid PNG costs one
+    line and removes the doubt entirely.
+
+    600x600 because the media-first platforms have minimum dimensions, and a
+    1x1 pixel would invite a refusal that says nothing about the feature.
+    """
+    # WRITTEN EVERY TIME, not "if it is missing". Guarding on existence meant
+    # the first run's file survived in the temp directory and every later run
+    # uploaded it - so replacing the broken base64 with a real drawing changed
+    # nothing on screen, and the picture stayed broken for a reason that no
+    # longer existed in the source.
+    from PIL import Image
+
+    Image.new("RGB", (600, 600), (122, 79, 46)).save(AN_IMAGE)
+    return str(AN_IMAGE)
 
 
 def finish_installing(page, journey):
@@ -1020,3 +1054,62 @@ class TestOneProviderAllTheWay:
             "the post is listed as sent AND still sitting in the queue with a"
             " Publish button beside it - pressing it would post it twice"
         )
+
+    def test_06_attaches_a_picture(self, a_page, a_journey, spec, live_server):
+        """Put a real file through the composer's own picker.
+
+        This is the step the media-first platforms have been waiting for, and
+        it starts where a person starts: the "Drag & drop or select files"
+        well in the caption box. Playwright answers the operating system's
+        file dialog with a file that exists on disk, so the browser uploads
+        real bytes rather than the test poking a field.
+        """
+        open_the_composer(a_page, a_journey)
+        choose_the_channel(a_page, a_journey)
+        a_page.get_by_placeholder("What would you like to share?").fill(A_POST_WITH_A_PICTURE)
+
+        # WHAT THE BROWSER COULD NOT FETCH. The attachment appears and the
+        # preview renders, but the thumbnail is drawn as a broken image - in
+        # the composer AND in the platform preview. That is either the file we
+        # sent, the URL the application serves it from, or the policy the page
+        # runs under, and only the responses say which.
+        refused = []
+        a_page.on(
+            "response",
+            lambda response: refused.append(f"{response.status} {response.url}") if response.status >= 400 else None,
+        )
+
+        with a_page.expect_file_chooser() as chosen:
+            a_page.get_by_text("select files").first.click()
+        chosen.value.set_files(an_image_on_disk())
+
+        # Uploading is a round trip, and the composer shows the picture when
+        # it has finished. Photographed after a pause so the picture is of the
+        # finished state rather than of the upload.
+        a_page.wait_for_load_state("networkidle")
+        a_page.wait_for_timeout(1500)
+        a_journey(a_page, "the-picture-is-attached")
+
+        # THE FILE IS ATTACHED, as the composer says: its name appears beside
+        # a control for removing it again, and the platform preview lays out a
+        # post card around it.
+        # BY ROLE, not by the file's name. Matching the name passed only while
+        # the thumbnail was BROKEN - the name is the image's alt text, which
+        # the browser draws in place of a picture it could not load. An
+        # assertion that holds only while something is broken is worse than
+        # none: it would have started failing the day the thumbnail worked.
+        assert a_page.get_by_role("main").get_by_role("img").count() >= 1, (
+            "the post has no picture on it after attaching one"
+        )
+
+        # Nothing was refused on the wire and the policy blocked nothing.
+        assert refused == [], f"the browser was refused: {refused}"
+        assert a_page.evaluate("window.__cspViolations || []") == [], "the policy blocked something on this page"
+
+        # STILL TO SETTLE, and recorded rather than glossed: the thumbnail is
+        # drawn as a broken image in both the composer and the preview, while
+        # the very same URL fetched from this browser answers 200 image/png.
+        # So the file is stored, the route serves it, the policy permits it and
+        # no request failed - and the page still cannot show it. That is worth
+        # its own look; it is not the subject of this step, which is whether a
+        # person can attach a picture at all.
