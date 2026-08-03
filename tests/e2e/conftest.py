@@ -376,6 +376,26 @@ def django_db_modify_db_settings(ephemeral_postgres):
     )
 
 
+@pytest.fixture
+def browser_context_args(browser_context_args):
+    """Give the browser a window tall enough to photograph a whole screen.
+
+    THE SCREENSHOTS ARE THE REVIEW CHANNEL, and at the default 1280x720 they
+    were lying by omission. `full_page=True` extends a screenshot to the height
+    of the DOCUMENT, but this application scrolls an INNER container - the
+    document itself is exactly one viewport tall - so a full-page shot of the
+    connect screen showed nine platform cards and cut the remaining four off
+    mid-row. Anything below the fold was invisible to whoever read the run
+    back, including me.
+
+    A taller window is not a lie about the product: it is a bigger monitor.
+    Nothing is faked and no scrolling is skipped - Playwright already scrolls a
+    control into view before clicking it, so this changes what the picture
+    CONTAINS, not what the test does.
+    """
+    return {**browser_context_args, "viewport": {"width": 1280, "height": 2000}}
+
+
 #: Where a run leaves the pictures of itself. Inside the repository, because
 #: they have to be readable by whoever is reading the run; ignored by git,
 #: because they are regenerated every time and asserted against never.
