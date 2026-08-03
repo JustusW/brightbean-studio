@@ -977,6 +977,26 @@ NEEDS_MEDIA = {"instagram", "instagram_login", "pinterest", "tiktok", "youtube"}
 #: testing.
 WANTS_VIDEO = {"tiktok", "youtube"}
 
+#: WHERE THE SLOW, DETERMINISTIC ATTACH IS PROVEN - once, not thirteen times.
+#:
+#: test_06 can attach a file either before the composer's first autosave or
+#: after it, and those are different paths through the product: before, the
+#: upload parks in the session with no post to belong to; after, the post
+#: exists and the page has been told its id. Reaching the second one means
+#: waiting for autosave's THIRTY-SECOND tick.
+#:
+#: That wait is worth thirty seconds. It is not worth thirteen times thirty,
+#: which is six and a half minutes added to a seven-minute suite and an e2e
+#: job that would then sit on its own twenty-minute timeout. The composer is
+#: the same code for every platform - what varies per platform is its own
+#: panel and its provider, neither of which is involved here - so this is a
+#: property of the product, proven on one platform, exactly as test_09 proves
+#: the article-title refusal only where articles exist.
+#:
+#: YouTube because that is where it was first suspected, and because a video
+#: is the attachment with the most to lose.
+THE_PLATFORM_THAT_WAITS_FOR_THE_DRAFT = "youtube"
+
 
 @pytest.fixture(scope="class", params=sorted(PLATFORMS))
 def spec(request):
@@ -1576,13 +1596,29 @@ class TestOneProviderAllTheWay:
         open_the_composer(a_page, a_journey)
         choose_the_channel(a_page, a_journey, spec)
 
-        # THE WORDS GO IN FIRST, which is the order a person works in and the
-        # order that finds defects. Typing starts the composer's autosave, and
-        # autosave is what creates the post - so an upload that follows can
-        # land in the window where the post already exists but the page has
-        # not yet been told, which is where media used to be lost for ever.
-        # Attaching first would avoid that window and prove nothing.
+        # THE WORDS GO IN FIRST, AND THE DRAFT IS THEN WAITED FOR. Typing is
+        # what sets the composer's autosave going, and autosave is what
+        # creates the post - so the interesting moment for an upload is AFTER
+        # the draft exists, while the page may not yet have been told its id.
+        # Attaching before any of that happens is the easy path and proves
+        # nothing.
+        #
+        # THE WAIT IS WHAT MAKES THIS A TEST. Autosave runs on a thirty-second
+        # tick, so a step that types and attaches within a few seconds never
+        # reaches that moment at all: the upload parks in the session with no
+        # post to attach to, and is swept up later. Whether the hard path was
+        # taken therefore depended on how slow the run happened to be - it
+        # passed alone and failed at the tail of a full run, which is not a
+        # test, it is a coin toss with a stopwatch.
+        #
+        # The product says when the draft exists, in its own words: the footer
+        # reads "Not saved yet" until the first autosave answers and "Saved
+        # HH:MM" afterwards. Waiting for that needs no internals.
         write_the_post(a_page, a_journey, spec, A_POST_WITH_A_PICTURE)
+
+        if spec["platform"] == THE_PLATFORM_THAT_WAITS_FOR_THE_DRAFT:
+            expect(a_page.get_by_text(re.compile(r"Saved \d\d:\d\d")).first).to_be_visible(timeout=60000)
+            a_journey(a_page, "the-draft-exists-before-anything-is-attached")
 
         # WHAT THE BROWSER COULD NOT FETCH. The attachment appears and the
         # preview renders, but the thumbnail is drawn as a broken image - in
