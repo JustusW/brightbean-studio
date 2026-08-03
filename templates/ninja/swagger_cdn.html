@@ -1,16 +1,27 @@
+{% load static %}
+{% comment %}
+  THE NAME IS DJANGO-NINJA'S, NOT A DESCRIPTION. This overrides ninja's own
+  ninja/swagger_cdn.html and has to keep that path to be found at all - but
+  nothing here comes from a CDN any more. Swagger UI is served from our own
+  static files, like everything else the browser loads; see
+  static/js/vendor/README.md.
+
+  The favicons pointed at django-ninja.dev, so this application's API docs
+  asked a third party's website for an image on every load. They are ours now.
+{% endcomment %}
 <!DOCTYPE html>
 <html>
 <head>
-    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
-    <link rel="icon" href="https://django-ninja.dev/img/favicon.svg" type="image/svg+xml">
-    <link rel="icon" href="https://django-ninja.dev/img/favicon.png" type="image/png">
+    <link type="text/css" rel="stylesheet" href="{% static 'js/vendor/swagger-ui.css' %}">
+    <link rel="icon" href="{% static 'favicon/favicon.svg' %}" type="image/svg+xml">
+    <link rel="icon" href="{% static 'favicon/favicon-96x96.png' %}" type="image/png">
     <title>{{ api.title }}</title>
 </head>
 <body>
     <div id="swagger-ui">
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script src="{% static 'js/vendor/swagger-ui-bundle.js' %}"></script>
     <script type="application/json" id="swagger-settings" nonce="{{ csp_nonce }}">
         {{ swagger_settings | safe }}
     </script>

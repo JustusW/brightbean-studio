@@ -306,11 +306,16 @@ TAILWIND_APP_NAME = "theme"
 # policy to SECURE_CSP_REPORT_ONLY.
 CSP_POLICY = {
     "default-src": [CSP.SELF],
-    "script-src": [CSP.SELF, CSP.UNSAFE_EVAL, CSP.NONCE, "https://cdn.jsdelivr.net"],
-    "style-src": [CSP.SELF, CSP.UNSAFE_INLINE, "https://cdn.jsdelivr.net"],
+    # NOTHING THIRD-PARTY EXECUTES HERE ANY MORE. These three directives used
+    # to allow https://cdn.jsdelivr.net, because flatpickr, chart.js and
+    # Swagger UI were loaded from it. Whatever that origin served could then
+    # run on every page of this application. All four are vendored now - see
+    # static/js/vendor/README.md - so the allowance is gone with them.
+    "script-src": [CSP.SELF, CSP.UNSAFE_EVAL, CSP.NONCE],
+    "style-src": [CSP.SELF, CSP.UNSAFE_INLINE],
     "img-src": [CSP.SELF, "data:", "blob:", "https:"],
     "font-src": [CSP.SELF],
-    "connect-src": [CSP.SELF, "https://cdn.jsdelivr.net"],
+    "connect-src": [CSP.SELF],
     "media-src": [CSP.SELF, "blob:"],
     "form-action": [
         CSP.SELF,
