@@ -454,3 +454,102 @@ def test_facebook_posts_to_the_connected_pages_feed(wire):
     # Graph names this field `message`. A post body under any other key is
     # accepted as a 200 with an EMPTY post.
     assert json.loads(request.content) == {"message": CAPTION}
+
+
+# ---------------------------------------------------------------------------
+# Instagram - https://developers.facebook.com/docs/instagram-platform/content-publishing
+# ---------------------------------------------------------------------------
+
+INSTAGRAM_USER_ID = "17841400000000000"
+INSTAGRAM_CONTAINER_ID = "17999888777666555"
+INSTAGRAM_MEDIA_ID = "17888777666555444"
+INSTAGRAM_TOKEN = "instagram-page-access"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_instagram_creates_a_container_waits_for_it_then_publishes_it(wire):
+    """Instagram publishes in THREE steps, and all three have to happen in order.
+
+    POST /{ig-user-id}/media creates a container; the container is polled
+    until status_code is FINISHED; POST /{ig-user-id}/media_publish then
+    publishes it by `creation_id`. Publishing a container that has not
+    finished ingesting returns "media not found" - so the poll is not
+    politeness, it is the documented protocol.
+
+    None of that is observable from a status check. The row goes PUBLISHED as
+    long as the LAST call returns an id, whether or not the container it named
+    was the one just created and whether or not anything waited for it.
+
+    Instagram also refuses a post with no media at all, and the image_url it
+    receives is derived by the ENGINE from the stored asset - which is why
+    this case attaches a real MediaAsset rather than handing over a URL.
+    """
+    recorder = wire(
+        {
+            f"/{INSTAGRAM_USER_ID}/media_publish": lambda request: httpx.Response(
+                200,
+                json={"id": INSTAGRAM_MEDIA_ID},
+            ),
+            f"/{INSTAGRAM_USER_ID}/media": lambda request: httpx.Response(
+                200,
+                json={"id": INSTAGRAM_CONTAINER_ID},
+            ),
+            # The container reports itself ready immediately. A real one would
+            # sit in IN_PROGRESS; the provider's poll loop is 60 attempts two
+            # seconds apart, so answering FINISHED at once is what keeps this
+            # case at seconds rather than minutes.
+            f"/v25.0/{INSTAGRAM_CONTAINER_ID}": lambda request: httpx.Response(
+                200,
+                json={"status_code": "FINISHED"},
+            ),
+            # NOT publishing - health check, inbox poll, analytics. See the
+            # Mastodon and Facebook cases.
+            "/insights": lambda request: httpx.Response(200, json={"data": []}),
+            "/conversations": lambda request: httpx.Response(200, json={"data": []}),
+            f"/v25.0/{INSTAGRAM_USER_ID}": lambda request: httpx.Response(
+                200,
+                json={"id": INSTAGRAM_USER_ID, "username": "brightbean", "followers_count": 7},
+            ),
+            f"/v25.0/{INSTAGRAM_MEDIA_ID}": lambda request: httpx.Response(
+                200,
+                json={"id": INSTAGRAM_MEDIA_ID},
+            ),
+        }
+    )
+    platform_post = schedule_a_post(
+        platform="instagram",
+        platform_id=INSTAGRAM_USER_ID,
+        token=INSTAGRAM_TOKEN,
+    )
+    attach_an_image(platform_post.post)
+
+    run_the_worker()
+
+    assert recorder.unexpected == [], f"unpredicted API calls: {recorder.unexpected}"
+    assert_published(platform_post, INSTAGRAM_MEDIA_ID)
+
+    container = recorder.call(f"/{INSTAGRAM_USER_ID}/media")
+    assert container is not None, "no container was created"
+    assert container.url.path == f"/v25.0/{INSTAGRAM_USER_ID}/media", (
+        f"created the container at {container.url.path}; the connected account's id did not reach the URL"
+    )
+    assert container.headers["Authorization"] == f"Bearer {INSTAGRAM_TOKEN}"
+
+    body = json.loads(container.content)
+    assert body["caption"] == CAPTION
+    # The URL is the engine's, not the test's: it reads the asset off storage
+    # and makes it absolute. Instagram fetches this itself, so a relative path
+    # would be unreachable to it however well-formed the request looked.
+    assert body["image_url"].startswith("http"), f"image_url is not absolute: {body['image_url']!r}"
+    assert body["image_url"].endswith(".png")
+
+    # The container was polled before it was published. Dropping that wait is
+    # a real and documented failure mode, and nothing else here would see it.
+    assert recorder.call(f"/v25.0/{INSTAGRAM_CONTAINER_ID}") is not None, (
+        "published without ever polling the container's status"
+    )
+
+    published = recorder.call("/media_publish")
+    assert json.loads(published.content) == {"creation_id": INSTAGRAM_CONTAINER_ID}, (
+        "the published creation_id is not the container that was just created"
+    )
