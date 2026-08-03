@@ -249,6 +249,39 @@ def _validate_pinterest_board_selection(request, post, workspace):
     return None
 
 
+def _validate_devto_title(request, post, workspace):
+    """A DEV.to post is an ARTICLE, and an article has to carry a title.
+
+    Checked here, while the person still has the composer open, rather than at
+    publish time. Without this the composer takes a titleless post, queues it
+    and schedules it - and the publishing engine then refuses it with "DEV.to
+    requires a title. Set the post title before publishing.", retries it three
+    times and fails it, long after whoever wrote it has walked away. The one
+    moment a person can act on the problem is the moment they are told about
+    it, and that moment is here.
+
+    Not applied to Save Draft: a draft is unfinished by definition, and the
+    title can be the last thing somebody writes. Every other action ends with
+    the post going out, or going to somebody to approve for going out.
+    """
+    selected_ids = _parse_selected_account_ids(request.POST.get("selected_accounts", ""))
+    if not selected_ids:
+        return None
+
+    accounts = SocialAccount.objects.filter(id__in=selected_ids, workspace=workspace, platform="devto")
+    shared_title = request.POST.get("title", "").strip()
+    for account in accounts:
+        # Either the post's own title or this channel's override will do -
+        # the override is what actually reaches DEV.to when it is set.
+        override = request.POST.get(f"override_title_{account.id}", "").strip()
+        if not (shared_title or override):
+            return JsonResponse(
+                {"errors": {"devto_title": f"Give the article a title for {account.account_name}."}},
+                status=400,
+            )
+    return None
+
+
 def _save_version(post, user):
     """Create a PostVersion snapshot."""
     version_number = (post.versions.count()) + 1
@@ -770,6 +803,14 @@ def save_post(request, workspace_id, post_id=None):
     pinterest_board_error = _validate_pinterest_board_selection(request, post, workspace)
     if pinterest_board_error is not None:
         return pinterest_board_error
+
+    # Everything except Save Draft commits the post to going out, so this is
+    # the last moment a missing article title can be raised with the person
+    # who can fix it. See _validate_devto_title.
+    if action != "save_draft":
+        devto_title_error = _validate_devto_title(request, post, workspace)
+        if devto_title_error is not None:
+            return devto_title_error
 
     # Handle action — note that Post itself no longer carries an editorial
     # status: every transition below operates on the PlatformPost children,

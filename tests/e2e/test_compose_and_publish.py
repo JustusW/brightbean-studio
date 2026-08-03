@@ -143,11 +143,15 @@ class PlatformEndpoints:
     """
 
     def __init__(self, routes):
+        #: path-suffix -> (which platform's table it came from, responder).
+        #: WHOSE route answered is recorded, because a suffix belongs to
+        #: whoever claimed it first and "/me" is claimed by three platforms.
         self.routes = routes
         self.requests: list[httpx.Request] = []
         self.sent: list[bytes] = []
         self.navigations: list[str] = []
         self.unexpected: list[str] = []
+        self.answered_by: list[str] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -163,8 +167,9 @@ class PlatformEndpoints:
             self.sent.append(request.content)
         except Exception:
             self.sent.append(b"")
-        for suffix, responder in self.routes.items():
+        for suffix, (owner, responder) in self.routes.items():
             if request.url.path.endswith(suffix):
+                self.answered_by.append(owner)
                 return responder(request)
         self.unexpected.append(f"{request.method} {request.url}")
         return httpx.Response(404, json={"error": "unrouted in this test"})
@@ -342,6 +347,13 @@ A_POST_LEFT_AS_A_DRAFT = "Thinking about a Saturday cupping session - not decide
 #: A post with a picture, for the platforms that will not take words alone.
 A_POST_WITH_A_PICTURE = "Latte art, first attempt of the morning."
 
+#: DEV.to posts are ARTICLES, and an article has a title. The composer grows a
+#: field for it as soon as a DEV.to channel is ticked.
+A_TITLE_FOR_AN_ARTICLE = "Notes from the roastery"
+
+#: Written to be queued with the title left empty, which DEV.to will not take.
+AN_ARTICLE_NOBODY_TITLED = "A thought I have not titled yet."
+
 #: The picture itself. Written to a temp file rather than committed, because a
 #: binary in the repository is a thing nobody can read in a diff. It is a real
 #: PNG - the composer, the media library and the platform all get to decide
@@ -394,6 +406,17 @@ def finish_installing(page, journey):
     page.wait_for_load_state("networkidle")
 
 
+def headers_of(request):
+    """Every header of a request as one string, with the values intact.
+
+    Built from the items rather than from the object's own representation,
+    because what this is used for is looking for a credential somebody typed
+    in - and a representation that abbreviates or hides a header value would
+    answer "never sent" about a request that carried it.
+    """
+    return " ".join(f"{name}: {value}" for name, value in request.headers.items())
+
+
 def answers(payload, status=200):
     """A platform endpoint that always answers the same document."""
     return lambda request: httpx.Response(status, json=payload)
@@ -417,7 +440,7 @@ A_TOKEN = answers({"access_token": "e2e-user-token", "token_type": "bearer", "ex
 #: text post at those and calling the refusal a failure would be testing the
 #: test. Their media journeys are the next feature steps to write, and until
 #: those exist this flag is what says so out loud rather than silently.
-OAUTH_PLATFORMS = {
+PLATFORMS = {
     "instagram": {
         "card": "Instagram",
         "endpoints": {
@@ -672,6 +695,156 @@ OAUTH_PLATFORMS = {
             "/me": answers({"id": "e2e-user", "name": "Brightbean Tester", "picture": {"data": {"url": ""}}}),
         },
     },
+    # THE THREE THAT ARE NOT OAUTH AT ALL, and that nothing has ever
+    # installed. A person is not sent to the platform to approve anything:
+    # they type something into a form on our own screen - Mastodon needs the
+    # instance to join, Bluesky an app password, DEV.to an API key.
+    #
+    # `connect` says how the channel is installed, and it is the only thing
+    # that differs. What each form ASKS FOR is discovered by driving it and
+    # reading the screen; the endpoints below are discovered by leaving them
+    # empty and letting the recorder name what went unanswered.
+    # Mastodon is FEDERATED, so there is no one place to be sent to: the
+    # instance has to be named first, and only then does the browser leave for
+    # it. Its screen says so - "After entering your instance URL, you'll be
+    # redirected to your Mastodon instance to authorize access".
+    "mastodon": {
+        "card": "Mastodon",
+        # THE INSTANCE ONLY. The field's own placeholder shows
+        # "mastodon.social@yourusername", and typing that SHAPE is refused:
+        # read as a URL, everything after the @ is the host, so it names a
+        # host of "yourusername" and the application answers "Invalid instance
+        # URL. Private or reserved addresses are not allowed." The placeholder
+        # demonstrates a value the form will not take.
+        "typed_in": {"Profile URL": "mastodon.social"},
+        "submitted_with": "Continue to Mastodon",
+        "endpoints": {
+            # THE INSTANCE HAS NEVER HEARD OF US, so before anybody can be
+            # sent there to approve anything, the application registers itself
+            # as an app ON that instance and gets a client id back. That is
+            # the step the other nine platforms do not have.
+            "/api/v1/apps": answers(
+                {
+                    "id": "1",
+                    "name": "Brightbean",
+                    "client_id": "e2e-mastodon-client",
+                    "client_secret": "e2e-mastodon-secret",
+                    "redirect_uri": "",
+                    "vapid_key": "",
+                }
+            ),
+            "/oauth/token": A_TOKEN,
+            # A post on Mastodon is a STATUS, and a picture is uploaded to the
+            # instance first and then referred to by id.
+            "/api/v1/statuses": answers(
+                {"id": "1", "url": "https://mastodon.social/@brightbean_test/1", "content": ""}
+            ),
+            "/api/v2/media": answers({"id": "1", "type": "image", "url": "", "preview_url": ""}),
+            "/api/v1/accounts/verify_credentials": answers(
+                {
+                    "id": "1",
+                    "username": "brightbean_test",
+                    "acct": "brightbean_test",
+                    "display_name": ACCOUNT_ON_THE_PLATFORM,
+                    "avatar": "",
+                    "followers_count": 7,
+                }
+            ),
+        },
+    },
+    # Bluesky and DEV.to never leave our site at all. A person pastes a
+    # credential they made on the platform, and the application has to go and
+    # check it - which is what test_03 asserts for them instead of an
+    # authorisation redirect that never comes.
+    "bluesky": {
+        "card": "Bluesky",
+        "typed_in": {
+            "Handle": "brightbean-test.bsky.social",
+            "App Password": "e2e1-e2e2-e2e3-e2e4",
+        },
+        "submitted_with": "Connect Bluesky",
+        "sends_you_to_the_platform": False,
+        "endpoints": {
+            # THE APP PASSWORD IS TRADED FOR A SESSION, which is how the
+            # platform says whether it is any good - and the reason a person
+            # can be told straight away that it is not.
+            "/xrpc/com.atproto.server.createSession": answers(
+                {
+                    "accessJwt": "e2e-access-jwt",
+                    "refreshJwt": "e2e-refresh-jwt",
+                    "handle": "brightbean-test.bsky.social",
+                    "did": "did:plc:e2ee2ee2ee2ee2ee2ee2",
+                }
+            ),
+            # A POST IS A RECORD IN THE PERSON'S OWN REPOSITORY, which is what
+            # "AT Protocol" means on the card: there is no /posts endpoint,
+            # the post is written into their repo and the picture is a blob
+            # uploaded to it first.
+            "/xrpc/com.atproto.repo.createRecord": answers(
+                {
+                    "uri": "at://did:plc:e2ee2ee2ee2ee2ee2ee2/app.bsky.feed.post/e2e",
+                    "cid": "e2e-cid",
+                }
+            ),
+            "/xrpc/com.atproto.repo.uploadBlob": answers(
+                {
+                    "blob": {
+                        "$type": "blob",
+                        "ref": {"$link": "e2e-blob-link"},
+                        "mimeType": "image/png",
+                        "size": 2338,
+                    }
+                }
+            ),
+            # And the session is then asked who it belongs to - the handle a
+            # person typed is not taken as proof of anything.
+            "/xrpc/com.atproto.server.getSession": answers(
+                {
+                    "handle": "brightbean-test.bsky.social",
+                    "did": "did:plc:e2ee2ee2ee2ee2ee2ee2",
+                    "email": "e2e-bluesky@brightbean.test",
+                }
+            ),
+            "/xrpc/app.bsky.actor.getProfile": answers(
+                {
+                    "did": "did:plc:e2ee2ee2ee2ee2ee2ee2",
+                    "handle": "brightbean-test.bsky.social",
+                    "displayName": ACCOUNT_ON_THE_PLATFORM,
+                    "avatar": "",
+                    "followersCount": 7,
+                }
+            ),
+        },
+    },
+    "devto": {
+        "card": "DEV.to",
+        "typed_in": {"API Key": "e2e-devto-api-key"},
+        "submitted_with": "Connect DEV.to",
+        "sends_you_to_the_platform": False,
+        "endpoints": {
+            # THE WHOLE SUFFIX, not "/me". DEV.to installed happily against
+            # Instagram's "/me" stub while this table was empty, because a
+            # route belongs to whoever claims the tail of the path first -
+            # which is exactly what answered_by now refuses to let pass.
+            "/api/users/me": answers(
+                {
+                    "id": 1,
+                    "username": "brightbean_test",
+                    "name": ACCOUNT_ON_THE_PLATFORM,
+                    "profile_image": "",
+                }
+            ),
+            # A post here is an ARTICLE - a title and a Markdown body, which
+            # is what the connect screen says it will be.
+            "/api/articles": answers(
+                {
+                    "id": 1,
+                    "title": A_TITLE_FOR_AN_ARTICLE,
+                    "url": "https://dev.to/brightbean_test/e2e",
+                }
+            ),
+        },
+    },
 }
 
 
@@ -699,10 +872,10 @@ NEEDS_MEDIA = {"instagram", "instagram_login", "pinterest", "tiktok", "youtube"}
 A_PICTURE_IS_NOT_ENOUGH = {"pinterest", "tiktok", "youtube"}
 
 
-@pytest.fixture(scope="class", params=sorted(OAUTH_PLATFORMS))
+@pytest.fixture(scope="class", params=sorted(PLATFORMS))
 def spec(request):
     """The provider this run of the suite is about - one run per row."""
-    return {"platform": request.param, **OAUTH_PLATFORMS[request.param]}
+    return {"platform": request.param, **PLATFORMS[request.param]}
 
 
 @pytest.fixture(scope="class")
@@ -723,10 +896,10 @@ def endpoints(platforms, spec):
     that where two platforms share a path suffix - "/me" belongs to three of
     them - the one under test wins.
     """
-    every_platform = dict(spec["endpoints"])
-    for other in OAUTH_PLATFORMS.values():
+    every_platform = {suffix: (spec["platform"], responder) for suffix, responder in spec["endpoints"].items()}
+    for name, other in PLATFORMS.items():
         for suffix, responder in other["endpoints"].items():
-            every_platform.setdefault(suffix, responder)
+            every_platform.setdefault(suffix, (name, responder))
     return platforms(every_platform)
 
 
@@ -754,6 +927,21 @@ def connect_the_channel(page, journey, spec):
     journey(page, "the-instant-connect-was-pressed")
     page.wait_for_load_state("networkidle")
     journey(page, "after-pressing-connect")
+
+    # SOME PLATFORMS ASK FOR SOMETHING FIRST, and pressing Connect only opens
+    # a form on our own screen: Mastodon wants the instance to go to, Bluesky
+    # a handle and an app password, DEV.to an API key. Each field is filled by
+    # the name printed above it - which is also what a screen reader would
+    # announce, so a field that cannot be found this way is a finding.
+    for label, value in spec.get("typed_in", {}).items():
+        page.get_by_label(label).fill(value)
+    if spec.get("typed_in"):
+        journey(page, "the-connection-details-are-typed-in")
+        hand_them_over = page.get_by_role("button", name=spec["submitted_with"])
+        expect(hand_them_over).to_be_enabled()
+        hand_them_over.click()
+        page.wait_for_load_state("networkidle")
+        journey(page, "after-handing-over-the-connection-details")
 
     finish_installing(page, journey)
 
@@ -861,6 +1049,40 @@ def settle_what_the_platform_insists_on(page, journey, spec):
     journey(page, "the-tiktok-audience-is-chosen")
 
 
+def write_the_post(page, journey, spec, words):
+    """Write the post, and title it where the platform demands a title.
+
+    A DEV.TO POST IS AN ARTICLE, and everything that lists one afterwards -
+    the chip on the calendar, the Queue, the Sent tab, the Drafts table -
+    shows its TITLE and never its caption. Steps that looked for the words
+    somebody typed into the caption box therefore found nothing at all, on a
+    product behaving perfectly sensibly.
+
+    So the title carries the same words as the post. That keeps one thing to
+    look for instead of two, and it keeps each post distinguishable from the
+    others - a fixed title would put the same words on all three.
+    """
+    if spec["platform"] == "devto":
+        # THE TITLE GOES IN FIRST, which is also the order a person works in,
+        # and here it is the only order that works at all:
+        #
+        #   ACCESSIBILITY FINDING. There IS a <label> reading "Article Title"
+        #   on the page - it appears in the document's own list of labels -
+        #   but get_by_label("Article Title") resolves to NOTHING, so that
+        #   label is not tied to the field. A screen-reader user meets an
+        #   unnamed text box, exactly as they do at the channel selector.
+        #
+        #   That leaves the placeholder, and the placeholder MOVES: it starts
+        #   as an invitation to type a title and becomes THE CAPTION ITSELF
+        #   once a caption exists - the document reported the title box
+        #   holding "Fresh beans, brewed bright..." moments after that was
+        #   typed below. So the field is findable before the caption is
+        #   written and not after.
+        page.get_by_placeholder("Enter a title").fill(words)
+    page.get_by_placeholder("What would you like to share?").fill(words)
+    journey(page, "the-post-is-written")
+
+
 class TestOneProviderAllTheWay:
     """One provider, one person, one session - from sign-up to published.
 
@@ -944,23 +1166,60 @@ class TestOneProviderAllTheWay:
 
         assert endpoints.unexpected == [], f"unpredicted platform calls: {endpoints.unexpected}"
 
-        assert endpoints.navigations, f"the browser was never sent to the platform.{endpoints.what_happened()}"
-        authorising = parse_qs(urlsplit(endpoints.navigations[0]).query)
-        assert authorising["redirect_uri"][0].startswith(live_server.url), (
-            f"the platform was told to send the person to {authorising['redirect_uri'][0]}, not back to us"
-        )
-        assert authorising.get("state", [""])[0], "no state was carried, so the callback cannot be tied to this request"
-        assert authorising.get("client_id") or authorising.get("client_key"), (
-            "the authorisation request identified no application"
+        # AND THIS PLATFORM'S OWN ENDPOINTS DID THE ANSWERING, not another's.
+        # The recorder answers EVERY platform's table, because the worker
+        # drains whatever earlier providers left behind - and it matches on
+        # the TAIL of a path, so a suffix belongs to whoever claimed it first.
+        # DEV.to installed perfectly against Threads' profile stub that way,
+        # green banner and all, with an endpoint table of its own that was
+        # EMPTY. A platform is covered only when its own routes were called.
+        assert spec["platform"] in endpoints.answered_by, (
+            "this platform's own endpoints were never called - it was satisfied by "
+            f"{sorted(set(endpoints.answered_by)) or 'nothing'}, so nothing here is evidence about it."
+            f"{endpoints.what_happened()}"
         )
 
-        # NOT VACUOUS. "no unexpected calls" is trivially true when no call was
-        # made at all, which is exactly what the first version of this
-        # reported: it passed while the browser sat doing nothing.
-        assert endpoints.exchanged_a_token(), (
-            f"the authorization code was never exchanged.{endpoints.what_happened()}"
-            f"\n  this tab is at: {a_page.url}"
-        )
+        if spec.get("sends_you_to_the_platform", True):
+            assert endpoints.navigations, f"the browser was never sent to the platform.{endpoints.what_happened()}"
+            authorising = parse_qs(urlsplit(endpoints.navigations[0]).query)
+            assert authorising["redirect_uri"][0].startswith(live_server.url), (
+                f"the platform was told to send the person to {authorising['redirect_uri'][0]}, not back to us"
+            )
+            assert authorising.get("state", [""])[0], (
+                "no state was carried, so the callback cannot be tied to this request"
+            )
+            assert authorising.get("client_id") or authorising.get("client_key"), (
+                "the authorisation request identified no application"
+            )
+
+            # NOT VACUOUS. "no unexpected calls" is trivially true when no call
+            # was made at all, which is exactly what the first version of this
+            # reported: it passed while the browser sat doing nothing.
+            assert endpoints.exchanged_a_token(), (
+                f"the authorization code was never exchanged.{endpoints.what_happened()}"
+                f"\n  this tab is at: {a_page.url}"
+            )
+        else:
+            # NOBODY IS SENT ANYWHERE for these two, so what must not be
+            # skipped is the CHECK. A person pastes a credential they made on
+            # the platform, and the application has to go and ask the platform
+            # whether it is any good. Storing it unasked would leave somebody
+            # believing a channel is connected until their first post fails
+            # silently, which is the worst moment to find out.
+            assert endpoints.requests, (
+                f"the details typed in were never checked against the platform.{endpoints.what_happened()}"
+            )
+            the_secret = list(spec["typed_in"].values())[-1]
+            presented = [
+                str(request.url)
+                for request in endpoints.requests
+                if the_secret in (headers_of(request) + endpoints.body_of(request))
+            ]
+            assert presented, (
+                "the platform was called, but never given the credential the person typed in - "
+                "so whatever was checked, it was not what they pasted."
+                f"{endpoints.what_happened()}"
+            )
 
         # INSTALLED, as the product itself reports it - not a row read out of
         # the database.
@@ -978,8 +1237,7 @@ class TestOneProviderAllTheWay:
         open_the_composer(a_page, a_journey)
         choose_the_channel(a_page, a_journey, spec)
 
-        a_page.get_by_placeholder("What would you like to share?").fill(A_POST_ABOUT_COFFEE)
-        a_journey(a_page, "the-post-is-written")
+        write_the_post(a_page, a_journey, spec, A_POST_ABOUT_COFFEE)
 
         # CHOOSING A CHANNEL CHANGES THE SCREEN, which the pictures show: the
         # counter becomes the platform's own caption limit, a "Customize"
@@ -1035,7 +1293,7 @@ class TestOneProviderAllTheWay:
 
         open_the_composer(a_page, a_journey)
         choose_the_channel(a_page, a_journey, spec)
-        a_page.get_by_placeholder("What would you like to share?").fill(A_POST_TO_PUBLISH_NOW)
+        write_the_post(a_page, a_journey, spec, A_POST_TO_PUBLISH_NOW)
 
         when = a_page.get_by_role("button", name="Next available")
         when.click()
@@ -1192,7 +1450,7 @@ class TestOneProviderAllTheWay:
         """
         open_the_composer(a_page, a_journey)
         choose_the_channel(a_page, a_journey, spec)
-        a_page.get_by_placeholder("What would you like to share?").fill(A_POST_WITH_A_PICTURE)
+        write_the_post(a_page, a_journey, spec, A_POST_WITH_A_PICTURE)
 
         # WHAT THE BROWSER COULD NOT FETCH. The attachment appears and the
         # preview renders, but the thumbnail is drawn as a broken image - in
@@ -1327,7 +1585,13 @@ class TestOneProviderAllTheWay:
             f"{request.method} {request.url}"
             for request, sent in zip(endpoints.requests, endpoints.sent, strict=False)
             if AN_IMAGE.stem in unquote_plus(sent.decode(errors="replace") + str(request.url))
-            or sent.startswith(b"\x89PNG")
+            # ANYWHERE IN THE BODY, not only at its start. Mastodon is sent
+            # the file as one part of a MULTIPART body, so the signature sits
+            # a couple of hundred bytes in, behind the part's own headers -
+            # and the name in those headers is the engine's temp file, not
+            # ours, so neither the name nor the first four bytes match while
+            # 2514 bytes of picture go up perfectly well.
+            or b"\x89PNG" in sent
         ]
         assert carried_the_picture, (
             "the platform was never given the picture."
@@ -1358,7 +1622,7 @@ class TestOneProviderAllTheWay:
         """
         open_the_composer(a_page, a_journey)
         choose_the_channel(a_page, a_journey, spec)
-        a_page.get_by_placeholder("What would you like to share?").fill(A_POST_LEFT_AS_A_DRAFT)
+        write_the_post(a_page, a_journey, spec, A_POST_LEFT_AS_A_DRAFT)
 
         save = a_page.get_by_role("button", name="Save Draft")
         expect(save).to_be_enabled()
@@ -1384,3 +1648,49 @@ class TestOneProviderAllTheWay:
         a_journey(a_page, "the-draft-is-listed")
 
         expect(a_page.get_by_role("main").get_by_text(A_POST_LEFT_AS_A_DRAFT[:12]).first).to_be_visible()
+
+    def test_09_an_article_with_no_title_is_refused_before_it_is_queued(self, a_page, a_journey, spec):
+        """A post that CANNOT publish must not be accepted as though it will.
+
+        DEV.to will not take an article without a title, and this composer used
+        to accept one anyway: it queued, it scheduled, and the publishing
+        engine refused it three retries later - "DEV.to requires a title. Set
+        the post title before publishing." - with nobody watching. The person
+        was told at the one moment they could do nothing about it.
+
+        So the refusal belongs here, while the composer is still open, and this
+        is the step that says so. It fails against the product as it was.
+        """
+        if spec["platform"] != "devto":
+            pytest.skip("only DEV.to demands a title of every post; the others have nothing to withhold")
+
+        open_the_composer(a_page, a_journey)
+        choose_the_channel(a_page, a_journey, spec)
+
+        # THE TITLE IS LEFT EMPTY ON PURPOSE. That is the whole subject.
+        a_page.get_by_placeholder("What would you like to share?").fill(AN_ARTICLE_NOBODY_TITLED)
+        a_journey(a_page, "an-article-nobody-titled")
+
+        queue_it = a_page.get_by_role("button", name="Add to Queue")
+        expect(queue_it).to_be_enabled()
+        queue_it.click()
+        a_page.wait_for_timeout(1500)
+        a_journey(a_page, "what-the-composer-says-about-the-missing-title")
+
+        # THE PERSON IS TOLD, in words, and is still standing in the composer
+        # with the post in front of them rather than on a calendar somewhere.
+        expect(a_page.get_by_text("Give the article a title").first).to_be_visible()
+        expect(queue_it).to_be_visible()
+
+        # AND NOTHING WAS QUEUED. The message alone is not enough: what made
+        # this a defect was the post going into the queue regardless.
+        # LEAVING THE COMPOSER IS A STEP OF ITS OWN. "List" belongs to the
+        # publishing screen, and we are still standing in the composer -
+        # which is the point of the assertion above.
+        a_page.get_by_role("link", name="Publish").first.click()
+        a_page.wait_for_load_state("networkidle")
+        to_the_list = a_page.get_by_role("link", name="List").or_(a_page.get_by_role("button", name="List")).first
+        to_the_list.click()
+        a_page.wait_for_load_state("networkidle")
+        a_journey(a_page, "the-queue-after-the-refusal")
+        expect(a_page.get_by_role("main").get_by_text(AN_ARTICLE_NOBODY_TITLED[:14])).to_have_count(0)

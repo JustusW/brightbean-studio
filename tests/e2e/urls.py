@@ -36,7 +36,7 @@ urlpatterns = [
     # and it is the wrong one: it returns an EMPTY list unless DEBUG is set, so
     # it would have quietly done nothing here and left the pictures broken.
     re_path(
-        r"^%s(?P<path>.*)$" % settings.MEDIA_URL.lstrip("/"),
+        rf"^{settings.MEDIA_URL.lstrip('/')}(?P<path>.*)$",
         serve,
         {"document_root": settings.MEDIA_ROOT},
     ),
