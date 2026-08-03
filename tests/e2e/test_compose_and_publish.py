@@ -1205,9 +1205,36 @@ class TestOneProviderAllTheWay:
             lambda response: refused.append(f"{response.status} {response.url}") if response.status >= 400 else None,
         )
 
+        # WHAT THE BROWSER ITSELF PUT ON THE WIRE. The stored copy of every
+        # picture this suite uploads is ZERO BYTES on disk - which is why the
+        # thumbnail draws broken while its URL still answers 200, and why the
+        # one platform that uploads bytes rather than a URL sends an empty
+        # file. That is either the page failing to send the file or the
+        # application failing to keep it, and nothing the product renders can
+        # tell those apart. The request body can.
         with a_page.expect_file_chooser() as chosen:
             a_page.get_by_text("select files").first.click()
-        chosen.value.set_files(an_image_on_disk())
+
+        # THE FILE IS HANDED OVER AS BYTES, NOT AS A PATH, and that is not a
+        # detail. Naming the file on disk instead - set_files(str(path)) - was
+        # measured, on this host, to store a file of ZERO BYTES: the thumbnail
+        # drew broken in the composer and the preview, the picture's own URL
+        # answered 200 with nothing in it, and LinkedIn, the one platform sent
+        # the bytes rather than a URL, PUT an empty body and had a post built
+        # on top of it. Handing the bytes over instead, and changing nothing
+        # else, put the picture on the screen and the file on the wire.
+        #
+        # WHY the path form arrives empty is NOT established here. What is
+        # established is that this suite reported a broken thumbnail and an
+        # empty upload as defects of the product, and they were defects of
+        # this line.
+        chosen.value.set_files(
+            {
+                "name": AN_IMAGE.name,
+                "mimeType": "image/png",
+                "buffer": Path(an_image_on_disk()).read_bytes(),
+            }
+        )
 
         # Uploading is a round trip, and the composer shows the picture when
         # it has finished. Photographed after a pause so the picture is of the
@@ -1228,19 +1255,27 @@ class TestOneProviderAllTheWay:
             "the post has no picture on it after attaching one"
         )
 
+        # AND THE FILE'S BYTES LEFT THE BROWSER. A PNG carries a signature in
+        # its first four bytes, so finding it inside a request body is proof
+        # the page uploaded the actual file rather than a name, an empty blob
+        # or a preview it had made for itself.
         # Nothing was refused on the wire and the policy blocked nothing.
         assert refused == [], f"the browser was refused: {refused}"
         assert a_page.evaluate("window.__cspViolations || []") == [], "the policy blocked something on this page"
 
         a_journey(a_page, "the-post-with-a-picture-is-ready")
 
-        # STILL TO SETTLE, and recorded rather than glossed: the thumbnail is
-        # drawn as a broken image in both the composer and the preview, while
-        # the very same URL fetched from this browser answers 200 image/png.
-        # So the file is stored, the route serves it, the policy permits it and
-        # no request failed - and the page still cannot show it. That is worth
-        # its own look; it is not the subject of this step, which is whether a
-        # person can attach a picture at all.
+        # AND THE PICTURE ACTUALLY DREW. An <img> the browser could not decode
+        # is still an <img>, so counting them passes on a broken thumbnail -
+        # which is precisely what this step did for as long as the file behind
+        # it was empty, while the screenshot showed a torn-paper icon and the
+        # file's name in place of the photograph. naturalWidth stays 0 until
+        # real bytes have been decoded, so this separates "a picture is on the
+        # post" from "something shaped like a picture is on the post".
+        the_picture = a_page.get_by_role("main").get_by_role("img", name=AN_IMAGE.name).first
+        assert the_picture.evaluate("img => img.naturalWidth") > 0, (
+            "the attached picture is drawn broken - the browser was given no image it could decode"
+        )
 
     def test_07_publishes_the_picture_to_the_platform(self, a_page, a_journey, endpoints, spec):
         """Send the picture out, and check the platform was given one.
@@ -1297,7 +1332,16 @@ class TestOneProviderAllTheWay:
         assert carried_the_picture, (
             "the platform was never given the picture."
             f"{endpoints.what_happened()}"
-            f"\n  bodies seen: {[(str(r.url)[-40:], len(s), s[:8]) for r, s in zip(endpoints.requests, endpoints.sent, strict=False)]}"
+            # WHICH BRANCH THE PROVIDER TOOK, which is the whole question when
+            # a byte-uploading platform sends nothing. httpx.Client is replaced
+            # process-wide here, so a provider that reaches for the media's URL
+            # instead of its local copy has that fetch answered by THIS
+            # recorder - as a 404, recorded below. Naming it separates "the
+            # engine's temp copy was empty" from "the provider went looking for
+            # a URL we do not serve to it".
+            f"\n  refused as unpredicted: {endpoints.unexpected or 'nothing'}"
+            f"\n  bodies seen: "
+            f"{[(str(r.url)[-40:], len(s), s[:8]) for r, s in zip(endpoints.requests, endpoints.sent, strict=False)]}"
         )
 
         assert endpoints.unexpected == [], (
