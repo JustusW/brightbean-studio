@@ -90,6 +90,23 @@ RATELIMIT_ENABLE = False
 # this dict turns those off. Both are set because both exist.
 ACCOUNT_RATE_LIMITS = {}
 
+# AND A THIRD ONE, WHICH IS A MIDDLEWARE and so is reached by neither setting
+# above. apps.accounts.middleware.AuthRateLimitMiddleware allows ten POSTs a
+# minute per IP to the sign-up, log-in and password-reset paths.
+#
+# This suite signs up once per platform - thirteen times now, all from
+# 127.0.0.1, inside a couple of minutes. The ELEVENTH sign-up met "Too many
+# requests. Please try again later." and every step after it ran against a
+# bare 429 page: no navigation, no buttons, thirty-second timeouts that read
+# like a broken application. It appeared the day the eleventh platform was
+# added and not before, which is exactly what a counter does.
+#
+# Taken out rather than reconfigured, because it has no setting to turn. The
+# cost is the same as the two above and is written down for the same reason:
+# with this gone, NOTHING in the browser suite covers this limiter. A test
+# that signs up until it is refused would have to put it back for itself.
+MIDDLEWARE = [layer for layer in MIDDLEWARE if not layer.endswith("AuthRateLimitMiddleware")]  # noqa: F405
+
 # SERVE THE FILES PEOPLE UPLOAD, or no media feature can be seen at all.
 # tests/e2e/urls.py is the application's own URL configuration with one route
 # appended for MEDIA_URL; the reasoning is written out in full there.
