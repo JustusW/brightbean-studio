@@ -368,6 +368,173 @@ A_TOKEN = answers({"access_token": "e2e-user-token", "token_type": "bearer", "ex
 #:
 #: A platform missing from here is NOT covered. Adding one is adding a row.
 OAUTH_PLATFORMS = {
+    "instagram": {
+        "card": "Instagram",
+        "endpoints": {
+            "/oauth/access_token": A_TOKEN,
+            "/me/accounts": answers(
+                {
+                    "data": [
+                        {
+                            "id": "111222333444555",
+                            "name": "A Facebook Page",
+                            "access_token": "e2e-page-token",
+                            "category": "Software",
+                            "picture": {"data": {"url": ""}},
+                            "instagram_business_account": {
+                                "id": "17841400000000000",
+                                "username": "brightbean_test",
+                                "name": ACCOUNT_ON_THE_PLATFORM,
+                                "profile_picture_url": "",
+                                "followers_count": 7,
+                                "media_count": 2,
+                            },
+                        }
+                    ]
+                }
+            ),
+        },
+    },
+    "instagram_login": {
+        "card": "Instagram (Direct)",
+        "endpoints": {
+            "/oauth/access_token": A_TOKEN,
+            # Instagram Login trades the short-lived token for a long-lived one
+            # at a DIFFERENT path on a different host. Listed after the one
+            # above because a suffix match takes the first route that fits and
+            # "/access_token" would otherwise swallow "/oauth/access_token".
+            "/access_token": A_TOKEN,
+            "/me": answers(
+                {
+                    "user_id": "17841400000000000",
+                    "username": "brightbean_test",
+                    "name": ACCOUNT_ON_THE_PLATFORM,
+                    "profile_picture_url": "",
+                    "followers_count": 7,
+                    "media_count": 2,
+                    "biography": "",
+                }
+            ),
+        },
+    },
+    "linkedin_personal": {
+        "card": "LinkedIn (Personal Profile)",
+        "endpoints": {
+            "/oauth/v2/accessToken": A_TOKEN,
+            # OIDC mode, which is what a dev app without Community Management
+            # approval gets: the profile comes from the userinfo claims.
+            "/v2/userinfo": answers({"sub": "e2e-member", "name": ACCOUNT_ON_THE_PLATFORM, "picture": ""}),
+        },
+    },
+    "linkedin_company": {
+        "card": "LinkedIn (Company Page)",
+        "endpoints": {
+            "/oauth/v2/accessToken": A_TOKEN,
+            "/v2/organizationalEntityAcls": answers(
+                {
+                    "elements": [
+                        {
+                            "organizationalTarget": "urn:li:organization:99887766",
+                            "organizationalTarget~": {
+                                "id": 99887766,
+                                "localizedName": ACCOUNT_ON_THE_PLATFORM,
+                                "vanityName": "brightbean-test",
+                            },
+                        }
+                    ]
+                }
+            ),
+        },
+    },
+    "tiktok": {
+        "card": "TikTok",
+        "endpoints": {
+            "/oauth/token/": A_TOKEN,
+            "/user/info/": answers(
+                {
+                    "data": {
+                        "user": {
+                            "open_id": "e2e-open-id",
+                            "union_id": "e2e-union-id",
+                            "avatar_url": "",
+                            "display_name": ACCOUNT_ON_THE_PLATFORM,
+                        }
+                    }
+                }
+            ),
+        },
+    },
+    "youtube": {
+        "card": "YouTube",
+        "endpoints": {
+            "/token": A_TOKEN,
+            "/channels": answers(
+                {
+                    "items": [
+                        {
+                            "id": "UCe2e0000000000000000000",
+                            "snippet": {
+                                "title": ACCOUNT_ON_THE_PLATFORM,
+                                "customUrl": "@brightbeantest",
+                                "thumbnails": {"default": {"url": ""}},
+                            },
+                            "statistics": {"subscriberCount": "7", "viewCount": "42", "videoCount": "2"},
+                        }
+                    ]
+                }
+            ),
+        },
+    },
+    "pinterest": {
+        "card": "Pinterest",
+        "endpoints": {
+            "/oauth/token": A_TOKEN,
+            "/user_account": answers(
+                {
+                    "id": "e2e-pinner",
+                    "username": "brightbean_test",
+                    "business_name": ACCOUNT_ON_THE_PLATFORM,
+                    "profile_image": "",
+                    "follower_count": 7,
+                }
+            ),
+        },
+    },
+    "threads": {
+        "card": "Threads",
+        "endpoints": {
+            "/oauth/access_token": A_TOKEN,
+            "/access_token": A_TOKEN,
+            "/me": answers(
+                {
+                    "id": "e2e-threads-user",
+                    "username": "brightbean_test",
+                    "name": ACCOUNT_ON_THE_PLATFORM,
+                    "threads_profile_picture_url": "",
+                    "threads_biography": "",
+                }
+            ),
+        },
+    },
+    "google_business": {
+        "card": "Google Business Profile",
+        "endpoints": {
+            "/token": A_TOKEN,
+            "/accounts": answers({"accounts": [{"name": "accounts/99887766"}]}),
+            "/locations": answers(
+                {
+                    "locations": [
+                        {
+                            "name": "locations/12345",
+                            "title": ACCOUNT_ON_THE_PLATFORM,
+                            "storefrontAddress": {"addressLines": ["1 Test Street"]},
+                            "phoneNumbers": {"primaryPhone": "+49 30 000000"},
+                        }
+                    ]
+                }
+            ),
+        },
+    },
     "facebook": {
         "card": "Facebook",
         "endpoints": {
@@ -444,7 +611,14 @@ def test_a_person_can_install_a_provider(platform, live_server, page, journey, p
     # form. Both facts came out of driving it: "Connect" alone named ten
     # controls identically, which is the accessibility defect this flow
     # uncovered, and the cards were never links at all.
-    connect = page.get_by_role("button", name=f"Connect {spec['card']}")
+    # EXACTLY that name. Substring matching was fine while Facebook was the
+    # only row; with the whole board in play "Connect Instagram" also names
+    # "Connect Instagram (Direct)", and "Connect LinkedIn (Personal Profile)"
+    # is only distinguishable from the Company Page card by the whole string.
+    # Playwright refuses an ambiguous locator rather than picking one, which is
+    # how this surfaced. exact=True is possible ONLY because each card carries
+    # an aria-label naming its platform - without it every card is "Connect".
+    connect = page.get_by_role("button", name=f"Connect {spec['card']}", exact=True)
     connect.highlight()
     journey(page, "the-control-about-to-be-clicked")
 
