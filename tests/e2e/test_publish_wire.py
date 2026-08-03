@@ -203,6 +203,33 @@ def attach_an_image(post, *, filename="e2e.png"):
     return asset
 
 
+def attach_a_video(post, *, filename="e2e.mp4", duration_sec=12.0):
+    """Attach one video to `post`, and return the asset.
+
+    An image will NOT substitute for the video-only platforms. The engine
+    discards every non-video attachment when the provider's supported_post_types
+    are a subset of VIDEO/SHORT, so attaching an image to a TikTok or YouTube
+    post leaves it with NO media at all - and both providers then refuse it
+    outright, which looks like a provider bug rather than a fixture mistake.
+
+    `duration_sec` matters: the engine passes the first video's duration to the
+    provider as video_duration_sec, and TikTok compares it against the
+    creator's own max_video_post_duration_sec BEFORE uploading anything.
+    """
+    workspace = post.workspace
+    asset = MediaAsset.objects.create(
+        organization=workspace.organization,
+        workspace=workspace,
+        filename=filename,
+        media_type="video",
+        mime_type="video/mp4",
+        duration=duration_sec,
+    )
+    asset.file.save(filename, ContentFile(b"pretend this is an mp4" * 8), save=True)
+    PostMedia.objects.create(post=post, media_asset=asset, position=0)
+    return asset
+
+
 def assert_published(platform_post, expected_id):
     platform_post.refresh_from_db()
     assert platform_post.status == PlatformPost.Status.PUBLISHED, (
