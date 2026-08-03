@@ -27,7 +27,7 @@ pick the control you can see. Do not guess a selector from the template.
 """
 
 import re
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote_plus, urlsplit
 
 import httpx
 import pytest
@@ -359,6 +359,13 @@ A_TOKEN = answers({"access_token": "e2e-user-token", "token_type": "bearer", "ex
 #: that platform serves. So those are a table and the journey is one test.
 #:
 #: A platform missing from here is NOT covered. Adding one is adding a row.
+#:
+#: `text_only` says whether the platform accepts a post that is nothing but
+#: words. Several do not, and the product is right to refuse them: Instagram
+#: and Pinterest need an image, TikTok and YouTube need a video. Driving a
+#: text post at those and calling the refusal a failure would be testing the
+#: test. Their media journeys are the next feature steps to write, and until
+#: those exist this flag is what says so out loud rather than silently.
 OAUTH_PLATFORMS = {
     "instagram": {
         "card": "Instagram",
@@ -413,6 +420,11 @@ OAUTH_PLATFORMS = {
         "card": "LinkedIn (Personal Profile)",
         "endpoints": {
             "/oauth/v2/accessToken": A_TOKEN,
+            # LinkedIn answers a created post with the URN in a header rather
+            # than the body, which is why this one carries headers at all.
+            "/rest/posts": lambda request: httpx.Response(
+                201, json={}, headers={"x-restli-id": "urn:li:share:7000000000000000000"}
+            ),
             # OIDC mode, which is what a dev app without Community Management
             # approval gets: the profile comes from the userinfo claims.
             "/v2/userinfo": answers({"sub": "e2e-member", "name": ACCOUNT_ON_THE_PLATFORM, "picture": ""}),
@@ -497,6 +509,11 @@ OAUTH_PLATFORMS = {
         "endpoints": {
             "/oauth/access_token": A_TOKEN,
             "/access_token": A_TOKEN,
+            # Threads publishes in two moves: a container, then a publish of
+            # that container. The longer suffix is listed first because a
+            # suffix match takes the first route that fits.
+            "/threads_publish": answers({"id": "e2e-thread-1"}),
+            "/threads": answers({"id": "e2e-container-1", "status": "FINISHED"}),
             "/me": answers(
                 {
                     "id": "e2e-threads-user",
@@ -513,6 +530,7 @@ OAUTH_PLATFORMS = {
         "endpoints": {
             "/token": A_TOKEN,
             "/accounts": answers({"accounts": [{"name": "accounts/99887766"}]}),
+            "/localPosts": answers({"name": "accounts/99887766/locations/12345/localPosts/1", "searchUrl": ""}),
             "/locations": answers(
                 {
                     "locations": [
@@ -559,6 +577,20 @@ OAUTH_PLATFORMS = {
 }
 
 
+#: The platforms THIS PRODUCT will not send a post of words alone to, read off
+#: their own composer panels: Instagram and Pinterest want an image, TikTok and
+#: YouTube a video. TikTok's panel, for instance, grows a required "Who can see
+#: this post" field and a COVER chooser the moment the channel is picked.
+#:
+#: That is a statement about the product, NOT about the platforms. YouTube has
+#: community posts - text, images, polls - and this product does not offer
+#: them; its YouTube provider handles video and shorts only. Instagram and
+#: Pinterest genuinely are media-first, but YouTube's absence here is a gap in
+#: what is built, and naming it in the harness is the honest place to record
+#: it until somebody decides whether to close it.
+NEEDS_MEDIA = {"instagram", "instagram_login", "pinterest", "tiktok", "youtube"}
+
+
 @pytest.fixture(scope="class", params=sorted(OAUTH_PLATFORMS))
 def spec(request):
     """The provider this run of the suite is about - one run per row."""
@@ -567,8 +599,27 @@ def spec(request):
 
 @pytest.fixture(scope="class")
 def endpoints(platforms, spec):
-    """The platform's own endpoints, answered for this provider's whole run."""
-    return platforms(spec["endpoints"])
+    """Answer EVERY platform's endpoints, with this provider's taking precedence.
+
+    The worker does not publish one provider's posts. It polls for everything
+    that is due, across the whole database - and this suite no longer resets
+    the database between providers, so by the time LinkedIn runs its publish
+    step the engine is also retrying whatever earlier providers left behind.
+    A recorder that only answered LinkedIn refused those, and the run reported
+    "the application called endpoints this test does not answer" naming
+    Google Business - which was true, and nothing to do with LinkedIn.
+
+    Answering every platform is not a loosening: each provider's own step
+    still asserts on ITS traffic, and an endpoint no provider declares is
+    still recorded as unpredicted. This provider's rows are inserted first so
+    that where two platforms share a path suffix - "/me" belongs to three of
+    them - the one under test wins.
+    """
+    every_platform = dict(spec["endpoints"])
+    for other in OAUTH_PLATFORMS.values():
+        for suffix, responder in other["endpoints"].items():
+            every_platform.setdefault(suffix, responder)
+    return platforms(every_platform)
 
 
 def connect_the_channel(page, journey, spec):
@@ -756,8 +807,14 @@ class TestOneProviderAllTheWay:
         expect(a_page.get_by_text(ACCOUNT_ON_THE_PLATFORM).first).to_be_visible()
         a_journey(a_page, "the-channel-is-installed")
 
-    def test_04_writes_a_text_post_and_queues_it(self, a_page, a_journey):
+    def test_04_writes_a_text_post_and_queues_it(self, a_page, a_journey, spec):
         """The first feature: a plain text post, written and queued."""
+        if spec["platform"] in NEEDS_MEDIA:
+            pytest.skip(
+                f"{spec['card']} does not take a post of words alone in this product - "
+                "its media journey is a feature step still to be written"
+            )
+
         open_the_composer(a_page, a_journey)
         choose_the_channel(a_page, a_journey)
 
@@ -797,7 +854,7 @@ class TestOneProviderAllTheWay:
         # the whole sentence would fail against a product behaving correctly.
         expect(a_page.get_by_role("main").get_by_text(THE_OPENING_WORDS).first).to_be_visible()
 
-    def test_05_publishes_a_post_now_and_it_reaches_the_platform(self, a_page, a_journey, endpoints):
+    def test_05_publishes_a_post_now_and_it_reaches_the_platform(self, a_page, a_journey, endpoints, spec):
         """THE POINT OF ALL OF IT: a post the person publishes reaches the platform.
 
         Queueing alone proves nothing about publishing. It puts the post in
@@ -810,6 +867,12 @@ class TestOneProviderAllTheWay:
         and Time"; the screenshot of that menu is what said so. This takes the
         one that publishes.
         """
+        if spec["platform"] in NEEDS_MEDIA:
+            pytest.skip(
+                f"{spec['card']} does not take a post of words alone in this product - "
+                "its media journey is a feature step still to be written"
+            )
+
         open_the_composer(a_page, a_journey)
         choose_the_channel(a_page, a_journey)
         a_page.get_by_placeholder("What would you like to share?").fill(A_POST_TO_PUBLISH_NOW)
@@ -862,10 +925,15 @@ class TestOneProviderAllTheWay:
         # database - the caption has to appear in a request that left this
         # application for the platform's endpoint. Anything less would pass
         # against a product that marks posts published and sends nothing.
+        # DECODED, because not every platform is sent JSON. Threads and
+        # Mastodon post form-encoded bodies, where the caption arrives as
+        # "Doors+open+at+seven" and a search for the plain words finds
+        # nothing - which reported "nothing ever reached the platform" for a
+        # publish that had gone out perfectly well.
         went_out = [
             f"{request.method} {request.url}"
             for request in endpoints.requests
-            if A_POST_TO_PUBLISH_NOW[:11] in endpoints.body_of(request)
+            if A_POST_TO_PUBLISH_NOW[:11] in unquote_plus(endpoints.body_of(request))
         ]
         assert went_out, (
             "nothing carrying the post's text ever reached the platform."
