@@ -335,6 +335,10 @@ THE_OPENING_WORDS = "Fresh beans"
 #: cannot be satisfied by the queued one.
 A_POST_TO_PUBLISH_NOW = "Doors open at seven. The espresso machine is already warm."
 
+#: A post that is kept rather than sent. Distinct from the others so that
+#: finding it under Drafts cannot be satisfied by one of them.
+A_POST_LEFT_AS_A_DRAFT = "Thinking about a Saturday cupping session - not decided yet."
+
 #: A post with a picture, for the platforms that will not take words alone.
 A_POST_WITH_A_PICTURE = "Latte art, first attempt of the morning."
 
@@ -518,6 +522,25 @@ OAUTH_PLATFORMS = {
         "card": "TikTok",
         "endpoints": {
             "/oauth/token/": A_TOKEN,
+            # WHAT TIKTOK LETS THIS CREATOR DO, asked fresh every time a post
+            # is composed - TikTok's own integration rules require it, because
+            # the allowed privacy levels depend on the app's audit status and
+            # the account's settings. Unanswered, the composer's required
+            # "Who can see this post" field sits on "Loading account
+            # settings..." for ever, and nothing can be saved at all - not
+            # even a draft.
+            "/creator_info/query/": answers(
+                {
+                    "data": {
+                        "creator_nickname": ACCOUNT_ON_THE_PLATFORM,
+                        "privacy_level_options": ["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "SELF_ONLY"],
+                        "comment_disabled": False,
+                        "duet_disabled": False,
+                        "stitch_disabled": False,
+                        "max_video_post_duration_sec": 600,
+                    }
+                }
+            ),
             "/user/info/": answers(
                 {
                     "data": {
@@ -762,7 +785,7 @@ def open_the_composer(page, journey):
     journey(page, "the-composer")
 
 
-def choose_the_channel(page, journey):
+def choose_the_channel(page, journey, spec):
     """Tick the connected channel, which no post can skip.
 
     ACCESSIBILITY FINDING, and this is how it was found. Asking for the
@@ -786,6 +809,57 @@ def choose_the_channel(page, journey):
     channel.click()
     journey(page, "the-channel-is-chosen")
 
+    settle_what_the_platform_insists_on(page, journey, spec)
+
+
+def settle_what_the_platform_insists_on(page, journey, spec):
+    """Fill the fields a platform will not let a post exist without.
+
+    TikTok grows its own panel the moment its channel is ticked, and one field
+    in it - "Who can see this post" - is REQUIRED, populated live from
+    TikTok's creator_info endpoint because the allowed audiences depend on the
+    app's audit status. Leaving it empty stops even SAVING A DRAFT: pressing
+    Save Draft produced the browser's own "Please fill out this field" bubble
+    and nothing was kept.
+
+    That is the product enforcing TikTok's rules, so the test answers it the
+    way a person does rather than treating the refusal as a fault.
+    """
+    if spec["platform"] == "pinterest":
+        # A PIN HAS TO GO ON A BOARD. Pinterest's panel carries a required
+        # "SELECT BOARD" - a real <select>, filled from the boards its API
+        # reports - and without it the browser refuses with "Please select an
+        # item in the list", so not even a draft can be kept. The board on
+        # offer is the one this suite's Pinterest endpoint answers with.
+        board = page.get_by_role("main").get_by_role("combobox").filter(has_text="Select a board").first
+        board.select_option(index=1)
+        journey(page, "the-pinterest-board-is-chosen")
+        return
+
+    if spec["platform"] != "tiktok":
+        return
+
+    # ANOTHER ACCESSIBILITY FINDING, found the same way as the channel
+    # tick-box: asking for this control BY ITS LABEL - "Who can see this
+    # post", which is printed right above it and carries the required marker -
+    # times out. The words are on the screen but are not tied to the field, so
+    # nothing announces what this control is for.
+    #
+    # Addressed by role and by the wording of its own first option, which is
+    # what a person reads inside the closed select.
+    # A CUSTOM DROPDOWN, not a select - select_option times out on it. It
+    # opens to "Everyone / Friends / Only you", which are exactly the three
+    # audiences TikTok's creator_info was told to allow, so this is also proof
+    # that the answer travelled from the platform boundary into the composer.
+    audience = page.get_by_role("main").get_by_text("Select who can view this post").first
+    audience.click()
+    page.wait_for_timeout(500)
+    journey(page, "the-tiktok-audience-choices")
+
+    page.get_by_role("main").get_by_text("Everyone", exact=True).first.click()
+    page.wait_for_timeout(500)
+    journey(page, "the-tiktok-audience-is-chosen")
+
 
 class TestOneProviderAllTheWay:
     """One provider, one person, one session - from sign-up to published.
@@ -800,15 +874,16 @@ class TestOneProviderAllTheWay:
     It also means an early failure fails what follows, which is honest: a
     person who cannot connect a channel cannot publish either.
 
-    THE NUMBERS IN THE NAMES ARE LOAD-BEARING. Tests are collected in NAME
-    order, not in the order they are written, and this suite was written
-    assuming otherwise: the step that connects the channel sorted ahead of the
-    step that navigates to the connect screen, so it hunted for a platform
-    card on the publishing queue and waited thirty seconds for one. The
-    screenshot of that moment shows the Publish page with the onboarding panel
-    still open, which is what said so.
+    THE ORDER IS THE ORDER THEY ARE WRITTEN IN, and the numbers in the names
+    only say so out loud. What actually reorders steps is pytest regrouping
+    items that share higher-scoped fixtures - that is what put the channel
+    connection ahead of the navigation to the connect screen, so it hunted for
+    a platform card on the publishing queue and waited thirty seconds for one.
+    The autouse fixture below removes the difference it was sorting on.
 
-    Two digits, because the feature steps to come will pass nine.
+    So a new step goes in its numbered PLACE, not merely under a numbered
+    name: adding test_08 above test_07 ran it first, and step 07 then opened
+    on a drafts list with no composer in sight.
     """
 
     @pytest.fixture(scope="class", autouse=True)
@@ -901,7 +976,7 @@ class TestOneProviderAllTheWay:
             )
 
         open_the_composer(a_page, a_journey)
-        choose_the_channel(a_page, a_journey)
+        choose_the_channel(a_page, a_journey, spec)
 
         a_page.get_by_placeholder("What would you like to share?").fill(A_POST_ABOUT_COFFEE)
         a_journey(a_page, "the-post-is-written")
@@ -959,7 +1034,7 @@ class TestOneProviderAllTheWay:
             )
 
         open_the_composer(a_page, a_journey)
-        choose_the_channel(a_page, a_journey)
+        choose_the_channel(a_page, a_journey, spec)
         a_page.get_by_placeholder("What would you like to share?").fill(A_POST_TO_PUBLISH_NOW)
 
         when = a_page.get_by_role("button", name="Next available")
@@ -1116,7 +1191,7 @@ class TestOneProviderAllTheWay:
         real bytes rather than the test poking a field.
         """
         open_the_composer(a_page, a_journey)
-        choose_the_channel(a_page, a_journey)
+        choose_the_channel(a_page, a_journey, spec)
         a_page.get_by_placeholder("What would you like to share?").fill(A_POST_WITH_A_PICTURE)
 
         # WHAT THE BROWSER COULD NOT FETCH. The attachment appears and the
@@ -1228,3 +1303,40 @@ class TestOneProviderAllTheWay:
         assert endpoints.unexpected == [], (
             f"the application called endpoints this test does not answer, so the publish failed: {endpoints.unexpected}"
         )
+
+    def test_08_saves_a_draft_and_finds_it_under_drafts(self, a_page, a_journey, spec):
+        """A post that is not ready to go anywhere yet.
+
+        The composer offers "Save Draft" beside the publishing controls, and
+        the publishing screen keeps a Drafts tab. Nothing in this suite had
+        pressed either, so drafts could have gone nowhere at all and every
+        test would still have passed.
+        """
+        open_the_composer(a_page, a_journey)
+        choose_the_channel(a_page, a_journey, spec)
+        a_page.get_by_placeholder("What would you like to share?").fill(A_POST_LEFT_AS_A_DRAFT)
+
+        save = a_page.get_by_role("button", name="Save Draft")
+        expect(save).to_be_enabled()
+        save.click()
+        a_page.wait_for_timeout(1500)
+        a_journey(a_page, "the-instant-save-draft-was-pressed")
+
+        # The composer leaves once the draft is kept, exactly as it does when
+        # a post is queued - waiting for it to go is what makes the assertion
+        # below about the DRAFTS tab rather than about the caption box it was
+        # typed into.
+        expect(save).to_have_count(0)
+        a_page.wait_for_load_state("networkidle")
+        a_journey(a_page, "the-draft-was-saved")
+
+        to_the_list = a_page.get_by_role("link", name="List").or_(a_page.get_by_role("button", name="List")).first
+        to_the_list.click()
+        drafts = a_page.get_by_role("link", name="Drafts").or_(a_page.get_by_role("button", name="Drafts")).first
+        expect(drafts).to_be_visible()
+        drafts.click()
+        a_page.wait_for_load_state("networkidle")
+        a_page.wait_for_timeout(1000)
+        a_journey(a_page, "the-draft-is-listed")
+
+        expect(a_page.get_by_role("main").get_by_text(A_POST_LEFT_AS_A_DRAFT[:12]).first).to_be_visible()
