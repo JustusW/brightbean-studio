@@ -64,10 +64,18 @@
                     <div class="h-full rounded-full transition-all duration-300" style="width: {% widthratio checklist_completed_count checklist_total_count 100 %}%; background: var(--primary);"></div>
                 </div>
                 <!-- Collapse button -->
+                {% comment %}
+                aria-label, not title alone. A title is only a LAST-RESORT
+                source for an accessible name: screen readers treat it
+                inconsistently and it is invisible to anyone navigating by
+                keyboard. These two buttons have no text at all, so the label
+                is the only thing that names them.
+                {% endcomment %}
                 <button @click="open = false"
                         class="w-6 h-6 flex items-center justify-center rounded-md text-stone-400 hover:text-stone-600 hover:bg-stone-100 transition-colors cursor-pointer"
+                        aria-label="Minimize checklist"
                         title="Minimize">
-                    <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <svg aria-hidden="true" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <polyline points="6 9 12 15 18 9"/>
                     </svg>
                 </button>
@@ -76,8 +84,9 @@
                         hx-target="#onboarding-checklist"
                         hx-swap="outerHTML"
                         class="w-6 h-6 flex items-center justify-center rounded-md text-stone-400 hover:text-stone-600 hover:bg-stone-100 transition-colors cursor-pointer"
+                        aria-label="Dismiss checklist"
                         title="Dismiss checklist">
-                    <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <svg aria-hidden="true" width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                     </svg>
                 </button>
