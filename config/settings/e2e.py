@@ -88,7 +88,11 @@ RATELIMIT_ENABLE = False
 # /accounts/signup/ is allauth's view, throttled by allauth's OWN limiter, not
 # by the django-ratelimit decorators used elsewhere in this codebase. Emptying
 # this dict turns those off. Both are set because both exist.
-ACCOUNT_RATE_LIMITS = {}
+# ANNOTATED BECAUSE IT IS EMPTY. mypy cannot infer the value type of a bare
+# {} and fails the type gate with "Need type annotation" - which is the whole
+# of what it was reporting, on a line that is correct. allauth maps an action
+# name to a rate, "login_failed" -> "10/m".
+ACCOUNT_RATE_LIMITS: dict[str, str] = {}
 
 # AND A THIRD ONE, WHICH IS A MIDDLEWARE and so is reached by neither setting
 # above. apps.accounts.middleware.AuthRateLimitMiddleware allows ten POSTs a
