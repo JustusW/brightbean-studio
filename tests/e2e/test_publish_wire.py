@@ -374,3 +374,83 @@ def test_devto_publishes_an_article_authenticated_by_its_api_key_header(wire):
     # The provider parses #hashtags out of the caption into Forem's tag list,
     # lowercased and stripped of everything that is not alphanumeric.
     assert article["tags"] == ["brightbean"]
+
+
+# ---------------------------------------------------------------------------
+# Facebook - https://developers.facebook.com/docs/graph-api/reference/page/feed/#publish
+# ---------------------------------------------------------------------------
+
+FACEBOOK_PAGE_ID = "111222333444555"
+FACEBOOK_POST_ID = "987654321"
+FACEBOOK_TOKEN = "facebook-page-access"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_facebook_posts_to_the_connected_pages_feed(wire):
+    """A Facebook text post is a JSON POST to /{page-id}/feed.
+
+    THE PAGE ID IS NOT A CONSTANT, and that is what this case is really for.
+    The provider raises without one, and the engine supplies it from the
+    CONNECTED ACCOUNT's own account_platform_id. Asserting the URL is
+    therefore asserting that the page the user connected is the page that gets
+    posted to - publishing somebody else's page is not a thing any status
+    check can see, because the row goes PUBLISHED either way.
+
+    Graph answers with a PAGE-SCOPED id, `{page-id}_{post-id}`, and the
+    provider stores only the post half. Everything that later reads
+    platform_post_id - post analytics, the first comment - is built on which
+    half landed in the row.
+    """
+    recorder = wire(
+        {
+            f"/{FACEBOOK_PAGE_ID}/feed": lambda request: httpx.Response(
+                200,
+                json={"id": f"{FACEBOOK_PAGE_ID}_{FACEBOOK_POST_ID}"},
+            ),
+            # NOT publishing, and routed anyway - the health check, the inbox
+            # poll and the ANALYTICS sync all run in the same worker window.
+            # See the Mastodon case for why leaving them unrouted fails a
+            # publishing test for reasons unrelated to publishing.
+            #
+            # Facebook is by far the noisiest account here, and the shape of
+            # the noise is itself worth knowing: page insights are fetched ONE
+            # METRIC PER REQUEST (fetch_insights_safe, so that one unsupported
+            # metric cannot fail the rest), and post insights are attempted
+            # against BOTH the bare and the page-scoped id. An unrouted run of
+            # this case reports 42 such calls.
+            "/insights": lambda request: httpx.Response(200, json={"data": []}),
+            "/v25.0/me": lambda request: httpx.Response(
+                200,
+                json={"id": FACEBOOK_PAGE_ID, "name": "Brightbean", "picture": {"data": {"url": ""}}},
+            ),
+            "/conversations": lambda request: httpx.Response(200, json={"data": []}),
+            f"/v25.0/{FACEBOOK_PAGE_ID}": lambda request: httpx.Response(200, json={"followers_count": 7}),
+            f"/v25.0/{FACEBOOK_POST_ID}": lambda request: httpx.Response(200, json={"id": FACEBOOK_POST_ID}),
+            f"/v25.0/{FACEBOOK_PAGE_ID}_{FACEBOOK_POST_ID}": lambda request: httpx.Response(
+                200,
+                json={"id": f"{FACEBOOK_PAGE_ID}_{FACEBOOK_POST_ID}"},
+            ),
+        }
+    )
+    platform_post = schedule_a_post(
+        platform="facebook",
+        platform_id=FACEBOOK_PAGE_ID,
+        token=FACEBOOK_TOKEN,
+    )
+
+    run_the_worker()
+
+    assert recorder.unexpected == [], f"unpredicted API calls: {recorder.unexpected}"
+    # The POST half only. Storing the page-scoped id here would not fail
+    # anything until analytics or the first comment tried to use it.
+    assert_published(platform_post, FACEBOOK_POST_ID)
+
+    request = recorder.call("/feed")
+    assert request.url.path == f"/v25.0/{FACEBOOK_PAGE_ID}/feed", (
+        f"posted to {request.url.path}; the connected page's id did not reach the URL"
+    )
+    assert request.headers["Authorization"] == f"Bearer {FACEBOOK_TOKEN}"
+
+    # Graph names this field `message`. A post body under any other key is
+    # accepted as a 200 with an EMPTY post.
+    assert json.loads(request.content) == {"message": CAPTION}
