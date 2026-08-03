@@ -32,10 +32,12 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
+from django.core.files.base import ContentFile
 from django.core.management import call_command
 from django.utils import timezone
 
-from apps.composer.models import PlatformPost, Post
+from apps.composer.models import PlatformPost, Post, PostMedia
+from apps.media_library.models import MediaAsset
 from apps.organizations.models import Organization
 from apps.social_accounts.models import SocialAccount
 from apps.workspaces.models import Workspace
@@ -140,12 +142,18 @@ def run_the_worker():
 # because CI will not forgive it:
 #
 #     gitleaks detect --source . --redact --verbose --no-banner
-def schedule_a_post(*, platform, platform_id, token, caption=CAPTION, instance_url="", title=""):
+def schedule_a_post(*, platform, platform_id, token, caption=CAPTION, instance_url="", title="", platform_extra=None):
     """One account on `platform` with one post due a minute ago.
 
     `title` is only meaningful for the platforms whose API demands one - DEV.to
     refuses an article without it, YouTube and Pinterest carry it as a separate
     field - so it defaults to empty and most cases never pass it.
+
+    `platform_extra` is the composer's per-platform metadata, which the engine
+    merges into PublishContent.extra. Several providers REFUSE to publish
+    without a particular key in it - Pinterest wants `board_id`, LinkedIn's
+    company variant an `author` URN - so a case for those platforms is not
+    expressible without it.
     """
     organization = Organization.objects.create(name=f"E2E {platform} Org")
     workspace = Workspace.objects.create(name=f"E2E {platform} WS", organization=organization)
@@ -164,7 +172,35 @@ def schedule_a_post(*, platform, platform_id, token, caption=CAPTION, instance_u
         social_account=account,
         status=PlatformPost.Status.SCHEDULED,
         scheduled_at=timezone.now() - timedelta(minutes=1),
+        platform_extra=platform_extra or {},
     )
+
+
+def attach_an_image(post, *, filename="e2e.png"):
+    """Attach one image to `post`, the way the composer does, and return the asset.
+
+    A URL string will not do. Several platforms refuse a post carrying no media
+    at all - Pinterest and Instagram among them - and the URL those providers
+    put on the wire is not something a test hands them: the engine reads
+    `asset.file.url` off the storage backend and makes it absolute against
+    APP_URL. Going through a real MediaAsset is what puts that step under test
+    rather than around it.
+
+    The bytes are plain ASCII and nothing reads them - these providers forward
+    a URL, and the one that uploads bytes (Bluesky) is covered in
+    test_publish_path.py.
+    """
+    workspace = post.workspace
+    asset = MediaAsset.objects.create(
+        organization=workspace.organization,
+        workspace=workspace,
+        filename=filename,
+        media_type="image",
+        mime_type="image/png",
+    )
+    asset.file.save(filename, ContentFile(b"pretend this is a png" * 4), save=True)
+    PostMedia.objects.create(post=post, media_asset=asset, position=0)
+    return asset
 
 
 def assert_published(platform_post, expected_id):
