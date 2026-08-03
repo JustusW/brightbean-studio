@@ -31,6 +31,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
+from django.core.management import call_command
+from django.db import connections
 from playwright.sync_api import expect
 
 #: The person this suite plays. A real address is never sent anywhere - the
@@ -313,6 +315,11 @@ A_POST_ABOUT_COFFEE = "Fresh beans, brewed bright. Come and taste the new roast.
 #: is what can honestly be looked for there.
 THE_OPENING_WORDS = "Fresh beans"
 
+#: A SECOND post, written to be published immediately rather than queued.
+#: Distinct from the first so that finding it in a request to the platform
+#: cannot be satisfied by the queued one.
+A_POST_TO_PUBLISH_NOW = "Doors open at seven. The espresso machine is already warm."
+
 
 def finish_installing(page, journey):
     """Complete the installation on whatever the platform's return lands on.
@@ -538,6 +545,14 @@ OAUTH_PLATFORMS = {
                     ]
                 }
             ),
+            # WHERE A PUBLISHED POST ACTUALLY GOES. Without this the engine's
+            # publish attempt met a 404 from the recorder, the post failed and
+            # stayed in the queue, and the Sent tab said "No sent posts yet" -
+            # which looked exactly like a product defect and was reported as
+            # one, twice, before the recorder's own unpredicted list was read.
+            "/feed": answers({"id": "111222333444555_98765432109876543"}),
+            "/photos": answers({"id": "98765432109876543", "post_id": "111222333444555_98765432109876543"}),
+            "/videos": answers({"id": "98765432109876543"}),
             "/me": answers({"id": "e2e-user", "name": "Brightbean Tester", "picture": {"data": {"url": ""}}}),
         },
     },
@@ -781,3 +796,159 @@ class TestOneProviderAllTheWay:
         # Matched on the opening words because the chip TRUNCATES - asserting
         # the whole sentence would fail against a product behaving correctly.
         expect(a_page.get_by_role("main").get_by_text(THE_OPENING_WORDS).first).to_be_visible()
+
+    def test_05_publishes_a_post_now_and_it_reaches_the_platform(self, a_page, a_journey, endpoints):
+        """THE POINT OF ALL OF IT: a post the person publishes reaches the platform.
+
+        Queueing alone proves nothing about publishing. It puts the post in
+        the next free slot - tomorrow - so it is never due, the worker never
+        picks it up, and the platform never hears a word. Everything up to
+        here was preamble to this step.
+
+        The product's own scheduling control offers "Now - Publish
+        immediately" alongside "Next Available", "Prioritise" and "Set Date
+        and Time"; the screenshot of that menu is what said so. This takes the
+        one that publishes.
+        """
+        open_the_composer(a_page, a_journey)
+        choose_the_channel(a_page, a_journey)
+        a_page.get_by_placeholder("What would you like to share?").fill(A_POST_TO_PUBLISH_NOW)
+
+        when = a_page.get_by_role("button", name="Next available")
+        when.click()
+        a_page.wait_for_timeout(500)
+        a_journey(a_page, "the-scheduling-choices")
+
+        a_page.get_by_text("Publish immediately").click()
+        a_page.wait_for_timeout(500)
+        a_journey(a_page, "set-to-publish-now")
+
+        # The action button renames itself once "Now" is chosen, so it is
+        # addressed by what it says rather than by what it said before.
+        publish = a_page.get_by_role("button", name="Publish Now")
+        expect(publish).to_be_enabled()
+        publish.click()
+        expect(publish).to_have_count(0)
+        a_page.wait_for_load_state("networkidle")
+        a_journey(a_page, "the-post-was-handed-to-the-worker")
+
+        # RUN THE WORKER, the way a deployment runs it.
+        #
+        # Pressing publish does not send anything: it hands the post to the
+        # publishing engine, and the engine only acts when its worker polls.
+        # The first version of this step asserted straight after the click and
+        # failed with the recorder showing only the token exchange and the
+        # account listing - which is the truth, and the reason queueing alone
+        # could never have proved publishing works.
+        #
+        # `run_publisher --once` is the product's own worker running a single
+        # poll cycle: the same entry point a deployment runs, not a reach into
+        # the engine.
+        call_command("run_publisher", once=True)
+
+        # HAND THE WORKER'S CONNECTIONS BACK. The engine publishes on a thread
+        # pool and this call opens a connection of its own; Django closes them
+        # when the thread's storage is collected, which is far too late. Left
+        # alone, the session survives the test and dropping the database fails
+        # with "1 andere Sitzung verwendet die Datenbank" - reported as a
+        # PytestWarning, which is an error wearing a smaller hat.
+        connections.close_all()
+
+        a_page.reload()
+        a_page.wait_for_load_state("networkidle")
+        a_journey(a_page, "the-post-was-published")
+
+        # WHAT THE PLATFORM ACTUALLY RECEIVED. Not a status in our own
+        # database - the caption has to appear in a request that left this
+        # application for the platform's endpoint. Anything less would pass
+        # against a product that marks posts published and sends nothing.
+        went_out = [
+            f"{request.method} {request.url}"
+            for request in endpoints.requests
+            if A_POST_TO_PUBLISH_NOW[:11] in endpoints.body_of(request)
+        ]
+        assert went_out, (
+            "nothing carrying the post's text ever reached the platform."
+            f"{endpoints.what_happened()}"
+        )
+
+        # AND THE PLATFORM ANSWERED IT. `went_out` records what the
+        # application SENT, including requests the recorder refused because
+        # this test never predicted them - so on its own it is satisfied by a
+        # publish that failed. That is not a hypothetical: the publish
+        # endpoint was missing from the table above, every attempt got a 404,
+        # and this step still reported the post as having reached the
+        # platform.
+        assert endpoints.unexpected == [], (
+            f"the application called endpoints this test does not answer, so the publish failed: {endpoints.unexpected}"
+        )
+
+        # AND THE PRODUCT AGREES IT WENT OUT. The request reaching the platform
+        # is one half; a person's evidence is the other. The publishing screen
+        # keeps a "Sent" tab, so the post has to be findable there rather than
+        # merely sitting on the calendar looking scheduled.
+        # PROVE THE VIEW CHANGED BEFORE READING IT. The first attempt clicked
+        # "List" and photographed the CALENDAR - the click had not taken
+        # effect yet - and then asserted against that, which is why it
+        # reported the post as still queued when it was looking at a calendar
+        # that shows every post regardless of status.
+        to_the_list = a_page.get_by_role("link", name="List").or_(a_page.get_by_role("button", name="List")).first
+        to_the_list.highlight()
+        a_journey(a_page, "the-control-that-opens-the-list")
+        to_the_list.click()
+
+        # The list is the view with the Queue / Drafts / Approvals / Sent tabs,
+        # so waiting for a tab to exist is waiting for the view itself.
+        sent = a_page.get_by_role("link", name="Sent").or_(a_page.get_by_role("button", name="Sent")).first
+        expect(sent).to_be_visible()
+
+        # A FULL LOAD OF THE LIST, not the client-side swap. The worker wrote
+        # to the database from outside the browser's world, so a view that was
+        # swapped in beforehand can be showing what was true a moment ago.
+        # Reloading here removes that explanation, and leaves only the
+        # product's own answer.
+        a_page.reload()
+        a_page.wait_for_load_state("networkidle")
+        a_journey(a_page, "the-publishing-list")
+
+        # THE QUEUE MUST HAVE LET IT GO. Asserting the post is "on the Sent
+        # tab" is worthless on its own: the same words are visible on the
+        # Queue tab, so the check passed while the screenshot showed both
+        # posts still queued, each with a Publish button beside them. What
+        # cannot be faked is the post LEAVING the queue.
+        still_queued = a_page.get_by_role("main").get_by_text(A_POST_TO_PUBLISH_NOW[:11]).count()
+
+        # SHOW WHAT IS ABOUT TO BE CLICKED, AND PROVE THE TAB CHANGED.
+        #
+        # An earlier version clicked "Sent", photographed, and read the counts
+        # - and the picture showed the QUEUE tab still active, so both counts
+        # came from the same view and the conclusion drawn from them ("it is
+        # on Sent and on Queue") was worth nothing. The queue's own tab badge
+        # is what settles which view is on screen.
+        sent.highlight()
+        a_journey(a_page, "the-control-that-opens-sent")
+        sent.click()
+        a_page.wait_for_load_state("networkidle")
+        a_page.wait_for_timeout(1000)
+        a_journey(a_page, "the-post-is-listed-as-sent")
+
+        on_the_sent_tab = a_page.get_by_role("main").get_by_text(A_POST_TO_PUBLISH_NOW[:11]).count()
+
+        # THE PRODUCT'S OWN ACCOUNT OF WHAT IT DID. The platform received the
+        # post - that is asserted above and is not in doubt. What is in doubt
+        # is whether the product knows, and these two counts say which defect
+        # is present if the answer is no:
+        #
+        #   not on Sent  -> the publish was never recorded as one, and the
+        #                   queue is right to still offer it;
+        #   on Sent AND still on Queue -> it was recorded, and the queue is
+        #                   over-inclusive - offering to publish, a second
+        #                   time, something already sent.
+        assert on_the_sent_tab, (
+            "the platform received the post but the product does not list it as sent"
+            f" (queue still shows it: {bool(still_queued)})"
+        )
+        assert not still_queued, (
+            "the post is listed as sent AND still sitting in the queue with a"
+            " Publish button beside it - pressing it would post it twice"
+        )
