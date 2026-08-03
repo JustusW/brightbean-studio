@@ -685,3 +685,106 @@ def test_tiktok_queries_creator_info_then_uploads_the_video_in_one_chunk(wire):
     assert source["total_chunk_count"] == 1
     # A single chunk still has to declare its range, and TikTok checks it.
     assert upload.headers["Content-Range"] == f"bytes 0-{size - 1}/{size}"
+
+
+# ---------------------------------------------------------------------------
+# YouTube - https://developers.google.com/youtube/v3/docs/videos/insert
+# ---------------------------------------------------------------------------
+
+YOUTUBE_CHANNEL_ID = "UC-e2e-channel"
+YOUTUBE_VIDEO_ID = "e2eYouTubeVid"
+YOUTUBE_UPLOAD_URI = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&upload_id=e2e-session"
+YOUTUBE_TOKEN = "youtube-user-access"
+
+
+def _youtube_videos_endpoint(request):
+    """Answer the resumable protocol's two different calls to ONE path.
+
+    videos.insert opens the session with a POST that carries only metadata and
+    answers a `Location` - the session URI - and the bytes then go to that URI
+    as a PUT. Google's session URI is the same path with an upload_id on the
+    query string, so both requests land here and only the METHOD tells them
+    apart. Answering the PUT with a Location, or the POST with a video id,
+    would let a provider that confused the two steps pass.
+    """
+    if request.method == "POST":
+        return httpx.Response(200, headers={"Location": YOUTUBE_UPLOAD_URI}, json={})
+    return httpx.Response(200, json={"id": YOUTUBE_VIDEO_ID})
+
+
+@pytest.mark.django_db(transaction=True)
+def test_youtube_opens_a_resumable_session_and_uploads_to_the_returned_uri(wire):
+    """A YouTube upload is a resumable session, and the SESSION URI is the point.
+
+    POST /upload/youtube/v3/videos?uploadType=resumable opens the session and
+    carries the metadata; Google answers a `Location` header; the bytes are
+    then PUT TO THAT URI. A provider that ignores the Location and puts the
+    bytes back to the opening endpoint uploads into nothing - and gets a
+    perfectly ordinary response for it.
+
+    The metadata is the other half. `part=snippet,status` is what makes Google
+    read those objects at all: without it the title, description, category and
+    privacy are accepted and DISCARDED, and the video appears with none of
+    them. Nothing downstream of this repository would notice - the row has an
+    id and a URL either way.
+    """
+    recorder = wire(
+        {
+            # ORDER MATTERS HERE. The upload host's path ENDS WITH the Data API
+            # path - ".../upload/youtube/v3/videos" and ".../youtube/v3/videos"
+            # - so a suffix router matches whichever is listed first. The
+            # upload endpoint has to come first or the analytics route swallows
+            # the publish.
+            "/upload/youtube/v3/videos": _youtube_videos_endpoint,
+            # NOT publishing - health check, analytics, inbox.
+            "/youtube/v3/channels": lambda request: httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": YOUTUBE_CHANNEL_ID,
+                            "snippet": {"title": "Brightbean", "thumbnails": {}},
+                            "statistics": {"subscriberCount": "7", "viewCount": "0", "videoCount": "1"},
+                        }
+                    ]
+                },
+            ),
+            "/youtube/v3/videos": lambda request: httpx.Response(200, json={"items": []}),
+            "/youtube/v3/commentThreads": lambda request: httpx.Response(200, json={"items": []}),
+            "/v2/reports": lambda request: httpx.Response(200, json={"columnHeaders": [], "rows": []}),
+        }
+    )
+    platform_post = schedule_a_post(
+        platform="youtube",
+        platform_id=YOUTUBE_CHANNEL_ID,
+        token=YOUTUBE_TOKEN,
+    )
+    attach_a_video(platform_post.post)
+
+    run_the_worker()
+
+    assert recorder.unexpected == [], f"unpredicted API calls: {recorder.unexpected}"
+    assert_published(platform_post, YOUTUBE_VIDEO_ID)
+
+    opened = recorder.call("/upload/youtube/v3/videos")
+    assert opened.method == "POST"
+    assert opened.headers["Authorization"] == f"Bearer {YOUTUBE_TOKEN}"
+    params = opened.url.params
+    assert params["uploadType"] == "resumable"
+    # Without `part`, Google accepts the metadata and throws it away.
+    assert params["part"] == "snippet,status"
+
+    metadata = json.loads(opened.content)
+    assert metadata["snippet"]["title"] == CAPTION
+    assert metadata["snippet"]["description"] == CAPTION
+    assert metadata["snippet"]["categoryId"] == "22"
+    assert metadata["status"]["privacyStatus"] == "public"
+    # Required of every upload since 2020; Google rejects a video without it.
+    assert metadata["status"]["selfDeclaredMadeForKids"] is False
+
+    uploads = [r for r in recorder.requests if r.method == "PUT"]
+    assert len(uploads) == 1, f"expected exactly one upload PUT, got {len(uploads)}"
+    assert str(uploads[0].url) == YOUTUBE_UPLOAD_URI, (
+        f"uploaded to {uploads[0].url}, not to the session URI Google returned - those bytes would go nowhere"
+    )
+    assert len(uploads[0].content) > 0, "the session was opened but no bytes were sent"
