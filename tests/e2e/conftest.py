@@ -230,6 +230,37 @@ def allow_sync_orm_on_the_browser_greenlet():
             os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = previous
 
 
+@pytest.fixture(scope="session", autouse=True)
+def allow_sync_orm_while_the_test_database_is_dropped(django_db_setup):
+    """Keep the guard disarmed for pytest-django's OWN database teardown.
+
+    The fixture above is package-scoped for a good reason, and that reason
+    leaves a hole. Dropping the test database happens at SESSION scope, after
+    this package's fixtures have been finalised and the guard put back - so
+    whenever a browser test is the last thing in the session, the drop runs
+    with Playwright's event loop still on the thread and Django refuses it.
+
+    What that looked like: a passing run carrying
+
+        PytestWarning: Error when trying to teardown test databases:
+        SynchronousOnlyOperation
+
+    which is an ERROR reported as a warning. It is invisible in a full-suite
+    run, where the last test is not a browser test, and appears the moment
+    somebody runs the browser file on its own - so it is order-dependent,
+    which makes it worse than a consistent failure rather than better.
+
+    THE ORDERING IS THE MECHANISM. This fixture depends on django_db_setup, so
+    it is created after it and therefore finalised BEFORE it. Setting the
+    variable on the way out means it is in force for exactly one thing: the
+    drop that follows. Nothing runs after a session finaliser, so unlike a
+    session-scoped autouse fixture this cannot leave the guard off under any
+    other test.
+    """
+    yield
+    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "1"
+
+
 def _stop_cluster_immediately(binaries: Path, datadir: Path) -> None:
     subprocess.run(
         [str(binaries / "pg_ctl"), "-D", str(datadir), "-m", "immediate", "-w", "stop"],
