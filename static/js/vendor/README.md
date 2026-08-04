@@ -27,6 +27,37 @@ on disk, so a truncated download is visible rather than silent.
 | `chart.umd.min.js` | 4.4.6 | `https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js` (205889 bytes) |
 | `swagger-ui.css` | 5.32.12 | `https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css` (178977 bytes) |
 | `swagger-ui-bundle.js` | 5.32.12 | `https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js` (1555039 bytes) |
+| `chart.umd.js.map` | 4.4.6 | `https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.js.map` (955808 bytes) |
+| `swagger-ui-bundle.js.map` | 5.32.12 | `https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.32.12/swagger-ui-bundle.js.map` (1920878 bytes) |
+| `swagger-ui.css.map` | 5.32.12 | `https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.32.12/swagger-ui.css.map` (279978 bytes) |
+
+## The source maps are not optional, and that is not obvious
+
+Three of these files end in a `sourceMappingURL` comment naming a `.map`
+beside them, and a minified bundle without its map is a file that references
+something nobody serves.
+
+Production does not shrug at that. It stores static files through whitenoise's
+`CompressedManifestStaticFilesStorage`, which POST-PROCESSES every CSS and JS
+file, resolves every URL it finds - source maps included - and refuses to
+finish when one is missing:
+
+    whitenoise.storage.MissingFileError: The file 'js/vendor/chart.umd.js.map'
+    could not be found
+
+So `manage.py collectstatic` fails, and with it the Docker image. Nothing
+local catches this: the e2e settings use ordinary storage, so the browser
+suite, the unit suite, ruff and mypy were all green while the image could not
+be built. The Docker job found it on its first run against the vendored files.
+
+If you upgrade one of these, take its `.map` with it. flatpickr ships none -
+its minified files reference nothing - which is why there are three maps here
+and not four.
+
+To check without waiting for CI:
+
+    DJANGO_SETTINGS_MODULE=config.settings.production SECRET_KEY=x \
+        DATABASE_URL=sqlite:///tmp/build.db python manage.py collectstatic --noinput
 
 The swagger templates asked for `@5`, a FLOATING major - whatever 5.x jsDelivr
 resolved that day. Pinned above at what it actually resolved to, because the
