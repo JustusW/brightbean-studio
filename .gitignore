@@ -231,3 +231,11 @@ theme/static/css/dist/
 # they change without notice, and a stale copy in the tree would be worse
 # than none.
 .api-reference/
+
+# Screenshots KEPT from a failed browser run. .e2e-screens/ is emptied at the
+# start of every run, so a failure's evidence lives exactly as long as it
+# takes somebody to start the next one - which is how a whole run's filmstrip
+# was destroyed once already. When a run fails, its pictures are copied here
+# under a per-run name and survive. Ignored, because they are evidence for a
+# moment rather than part of the tree.
+.e2e-failures/
