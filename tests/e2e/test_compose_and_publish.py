@@ -350,6 +350,12 @@ A_POST_TO_PUBLISH_NOW = "Doors open at seven. The espresso machine is already wa
 #: finding it under Drafts cannot be satisfied by one of them.
 A_POST_LEFT_AS_A_DRAFT = "Thinking about a Saturday cupping session - not decided yet."
 
+#: WHAT GOES IN THE FIRST COMMENT, which is a separate request to the platform
+#: made by a separate worker some time after the post itself. Distinct wording
+#: on purpose: finding these words in a request proves the COMMENT arrived,
+#: and cannot be satisfied by the post that carried the caption.
+A_FIRST_COMMENT = "Beans from the Kiunyu washing station, if anyone asks."
+
 #: A post with a picture, for the platforms that will not take words alone.
 A_POST_WITH_A_PICTURE = "Latte art, first attempt of the morning."
 
@@ -484,6 +490,36 @@ def headers_of(request):
 def answers(payload, status=200):
     """A platform endpoint that always answers the same document."""
     return lambda request: httpx.Response(status, json=payload)
+
+
+def whoever_the_token_belongs_to(request):
+    """Graph API /me answers as the OWNER OF THE TOKEN, and that matters here.
+
+    A USER token makes /me the person; a PAGE token makes it the Page. That is
+    not a detail - it is the whole reason a Page channel keeps its name.
+
+    THIS SUITE ANSWERED /me WITH THE PERSON REGARDLESS, and the moment the
+    background worker started running, that broke the run: the account health
+    check calls get_profile() and writes the result back over the channel's
+    name, so the connected Page "Brightbean Test Page" silently became
+    "Brightbean Tester" between one step and the next, and every later step
+    looked for a channel that no longer existed.
+
+    The product is right and the stub was wrong. Nothing in the application
+    changed for this.
+    """
+    carrying = headers_of(request) + str(request.url)
+    if "e2e-page-token" in carrying:
+        return httpx.Response(
+            200,
+            json={
+                "id": "111222333444555",
+                "name": ACCOUNT_ON_THE_PLATFORM,
+                "followers_count": 7,
+                "picture": {"data": {"url": ""}},
+            },
+        )
+    return httpx.Response(200, json={"id": "e2e-user", "name": "Brightbean Tester", "picture": {"data": {"url": ""}}})
 
 
 #: A token response, which every OAuth platform answers in the same shape.
@@ -814,7 +850,63 @@ PLATFORMS = {
             "/feed": answers({"id": "111222333444555_98765432109876543"}),
             "/photos": answers({"id": "98765432109876543", "post_id": "111222333444555_98765432109876543"}),
             "/videos": answers({"id": "98765432109876543"}),
-            "/me": answers({"id": "e2e-user", "name": "Brightbean Tester", "picture": {"data": {"url": ""}}}),
+            # EVERYTHING BELOW HERE IS REACHED BY THE BACKGROUND WORKER, and
+            # none of it was reachable at all until this suite started running
+            # process_tasks. The engine hands the first comment to that worker,
+            # and draining its queue also releases the recurring inbox sync and
+            # analytics collection - so these are not extra endpoints somebody
+            # invented, they are what the product does when both its workers
+            # are running.
+            #
+            # THE FIRST COMMENT. Graph API: POST /{object-id}/comments answers
+            # the new comment's id. This is the one the publisher's own task
+            # calls, two minutes after the post in production and immediately
+            # here (see PUBLISHER_FIRST_COMMENT_DELAY in the e2e settings).
+            "/comments": answers({"id": "111222333444555_98765432109876544"}),
+            # THE INBOX. apps/inbox/tasks.py syncs conversations on a repeat
+            # schedule. An EMPTY list is a real answer - a page with no
+            # messages - and it covers that the call is made and parsed. It
+            # does NOT cover reading a message, which needs its own step and
+            # is not written yet.
+            "/conversations": answers({"data": []}),
+            # ANALYTICS. providers/meta_insights.py asks for one metric at a
+            # time, and providers/facebook.py asks for per-post insights.
+            # Empty data again: enough to prove the collection runs and
+            # handles what comes back, not enough to claim the numbers are
+            # right. THESE SHAPES ARE NOT DOCUMENTED-GROUNDED like TikTok's
+            # and YouTube's are - they are the Graph API's general envelope,
+            # written from knowledge rather than photographed, and that is
+            # said out loud rather than implied.
+            "/insights": answers({"data": []}),
+            # And the objects those collectors read back by id: the page for
+            # its follower count, the post for its own fields. Listed after
+            # the two above so a path ending in /insights is not swallowed.
+            "/111222333444555_98765432109876543": answers(
+                {
+                    "id": "111222333444555_98765432109876543",
+                    "message": A_POST_TO_PUBLISH_NOW,
+                    "created_time": "2026-08-04T07:00:00+0000",
+                    "permalink_url": "",
+                    "shares": {"count": 0},
+                    "comments": {"summary": {"total_count": 0}},
+                    "reactions": {"summary": {"total_count": 0}},
+                }
+            ),
+            "/98765432109876543": answers(
+                {
+                    "id": "98765432109876543",
+                    "message": A_POST_WITH_A_PICTURE,
+                    "created_time": "2026-08-04T07:00:00+0000",
+                    "permalink_url": "",
+                    "shares": {"count": 0},
+                    "comments": {"summary": {"total_count": 0}},
+                    "reactions": {"summary": {"total_count": 0}},
+                }
+            ),
+            "/111222333444555": answers({"id": "111222333444555", "followers_count": 7}),
+            # ANSWERED BY THE TOKEN, not by a fixed document - see
+            # whoever_the_token_belongs_to for what that cost when it wasn't.
+            "/me": whoever_the_token_belongs_to,
         },
     },
     # THE THREE THAT ARE NOT OAUTH AT ALL, and that nothing has ever
@@ -1223,6 +1315,37 @@ def let_the_worker_run(endpoints, platform, ticks=5):
             return
 
 
+def let_the_background_work_happen(seconds=3):
+    """Run the OTHER worker - the one this suite has never run at all.
+
+    A deployment runs TWO processes beside the web service: run_publisher, and
+    process_tasks for django-background-tasks. Everything deferred belongs to
+    the second one, and the publishing engine hands it the first comment -
+    @background(schedule=...) ENQUEUES and nothing more.
+
+    So a suite that runs only the publisher watches posts go out and every
+    deferred job pile up unexecuted. requirements/background-work.md says it
+    in the product's own words: "The web service only enqueues; nothing in it
+    executes. A deployment with a healthy web service and no worker serves
+    every page correctly and publishes nothing."
+
+    BOUNDED BY --duration, because this command has no single-pass mode: left
+    alone it runs for ever, and its exit code answers nothing - the same
+    document records that it exits 0 against a database it cannot reach. So
+    this asks for a few seconds and the caller reads the WORK afterwards,
+    never the status.
+
+    The sleep is shortened from its five-second default for the same reason
+    the duration is short: an empty queue would otherwise cost five seconds
+    per call, thirteen times a run, for nothing.
+    """
+    call_command("process_tasks", duration=seconds, sleep=0.5)
+    # The tasks run in this process, so they publish through the same replaced
+    # httpx.Client the recorder is behind - and they open their own database
+    # connections, which are handed back here for the reason given above.
+    connections.close_all()
+
+
 def write_the_post(page, journey, spec, words):
     """Write the post, and title it where the platform demands a title.
 
@@ -1469,6 +1592,17 @@ class TestOneProviderAllTheWay:
         choose_the_channel(a_page, a_journey, spec)
         write_the_post(a_page, a_journey, spec, A_POST_TO_PUBLISH_NOW)
 
+        # THE FIRST COMMENT, WHERE THE PRODUCT OFFERS ONE. The field appears
+        # beside the caption only for the platforms whose accounts report they
+        # support it, so its PRESENCE is the product telling us whether this
+        # post can carry one - which is why that is what is asked, rather than
+        # a list of platform names kept in this file and going stale.
+        the_first_comment = a_page.get_by_placeholder("First comment posted after the main post")
+        this_platform_takes_a_first_comment = the_first_comment.count() > 0
+        if this_platform_takes_a_first_comment:
+            the_first_comment.fill(A_FIRST_COMMENT)
+            a_journey(a_page, "the-first-comment-is-written")
+
         when = a_page.get_by_role("button", name="Next available")
         when.click()
         a_page.wait_for_timeout(500)
@@ -1501,6 +1635,12 @@ class TestOneProviderAllTheWay:
         # the engine.
         let_the_worker_run(endpoints, spec["platform"])
 
+        # AND THEN THE OTHER WORKER, which is what a deployment has running
+        # beside the publisher. The engine does not post the first comment
+        # itself - it enqueues it - so without this the comment is scheduled
+        # on every publish and sent on none.
+        let_the_background_work_happen()
+
         a_page.reload()
         a_page.wait_for_load_state("networkidle")
         a_journey(a_page, "the-post-was-published")
@@ -1531,6 +1671,21 @@ class TestOneProviderAllTheWay:
         assert endpoints.unexpected == [], (
             f"the application called endpoints this test does not answer, so the publish failed: {endpoints.unexpected}"
         )
+
+        # AND THE FIRST COMMENT FOLLOWED IT, as a SEPARATE request made by a
+        # SEPARATE worker. Nothing in this suite had ever checked that, for
+        # the plain reason that nothing had ever run the worker: the engine
+        # enqueued the task on every publish and the queue was never drained.
+        # A person who typed a first comment got a post and silence.
+        if this_platform_takes_a_first_comment:
+            the_comment_went_out = [
+                f"{request.method} {request.url}"
+                for request in endpoints.requests
+                if A_FIRST_COMMENT[:14] in unquote_plus(endpoints.body_of(request))
+            ]
+            assert the_comment_went_out, (
+                f"the post reached the platform but its first comment never did.{endpoints.what_happened()}"
+            )
 
         # AND THE PRODUCT AGREES IT WENT OUT. The request reaching the platform
         # is one half; a person's evidence is the other. The publishing screen

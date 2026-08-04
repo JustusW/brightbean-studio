@@ -111,6 +111,25 @@ ACCOUNT_RATE_LIMITS: dict[str, str] = {}
 # that signs up until it is refused would have to put it back for itself.
 MIDDLEWARE = [layer for layer in MIDDLEWARE if not layer.endswith("AuthRateLimitMiddleware")]  # noqa: F405
 
+# THE FIRST COMMENT'S DELAY, WHICH IS TWO MINUTES IN PRODUCTION AND IS HALF
+# THE REASON THAT FEATURE HAS NEVER BEEN TESTED.
+#
+# The publishing engine does not post a first comment itself: it ENQUEUES a
+# background task scheduled PUBLISHER_FIRST_COMMENT_DELAY seconds after the
+# post goes out - 120 by default, so the platform sees the post and then the
+# comment two minutes later. No suite can wait two minutes per platform.
+#
+# The other half of the reason is that nothing here ever drained that queue,
+# so the task was enqueued on every publish and executed never. Both halves
+# are fixed together or neither is: a delay of zero with no worker still runs
+# nothing, and a worker still cannot wait out 120 seconds.
+#
+# Zero makes the task due the moment it is enqueued. THE DELAY ITSELF IS
+# THEREFORE NOT COVERED - only that the comment is scheduled, is picked up,
+# and reaches the platform. Same trade as the throttles above, stated for the
+# same reason: a test that needs the delay would have to restore it.
+PUBLISHER_FIRST_COMMENT_DELAY = 0
+
 # SERVE THE FILES PEOPLE UPLOAD, or no media feature can be seen at all.
 # tests/e2e/urls.py is the application's own URL configuration with one route
 # appended for MEDIA_URL; the reasoning is written out in full there.
