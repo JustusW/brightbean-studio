@@ -556,6 +556,42 @@ PLATFORMS = {
             # before that returns "media not found". The id below is the one
             # answered above, which is why this route can be written at all.
             "/17800000000000001": answers({"status_code": "FINISHED", "status": "Finished"}),
+            # AND WHAT THE BACKGROUND WORKER READS BACK AFTERWARDS: the
+            # account for its health check and follower count, the published
+            # media for its metrics. Both are asked for by id with an explicit
+            # ?fields= list, on graph.facebook.com AND graph.instagram.com -
+            # one row covers both, since a route matches on the path's tail.
+            #
+            # THESE SURFACED DURING THREADS, not during Instagram. The worker
+            # drains whatever is due, and by then the database holds the
+            # accounts every earlier platform connected - so Instagram's own
+            # recurring work runs while a later platform is on screen. Same
+            # shape as the publisher's backlog, and the reason this table
+            # answers every platform rather than only the one under test.
+            "/17841400000000000": answers(
+                {
+                    "id": "17841400000000000",
+                    "username": "brightbean_test",
+                    "name": ACCOUNT_ON_THE_PLATFORM,
+                    "profile_picture_url": "",
+                    "followers_count": 7,
+                    "media_count": 2,
+                }
+            ),
+            "/17900000000000001": answers(
+                {
+                    "id": "17900000000000001",
+                    "caption": A_POST_TO_PUBLISH_NOW,
+                    "media_type": "IMAGE",
+                    "media_product_type": "FEED",
+                    "media_url": "",
+                    "thumbnail_url": "",
+                    "permalink": "",
+                    "timestamp": "2026-08-04T07:00:00+0000",
+                    "like_count": 0,
+                    "comments_count": 0,
+                }
+            ),
             "/me/accounts": answers(
                 {
                     "data": [
@@ -625,6 +661,27 @@ PLATFORMS = {
         "card": "LinkedIn (Company Page)",
         "endpoints": {
             "/oauth/v2/accessToken": A_TOKEN,
+            # ANALYTICS FOR AN ORGANISATION'S SHARE. Zeroes rather than
+            # invented traffic: this covers that the collector runs and reads
+            # what comes back, and claims nothing about the numbers. It
+            # surfaced against the PUBLISH steps as well as the deferred-work
+            # one, because the worker runs whatever is due whenever it runs.
+            "/rest/organizationalEntityShareStatistics": answers(
+                {
+                    "elements": [
+                        {
+                            "totalShareStatistics": {
+                                "impressionCount": 0,
+                                "engagementCount": 0,
+                                "likeCount": 0,
+                                "commentCount": 0,
+                                "shareCount": 0,
+                                "clickCount": 0,
+                            }
+                        }
+                    ]
+                }
+            ),
             "/v2/organizationalEntityAcls": answers(
                 {
                     "elements": [
@@ -713,6 +770,45 @@ PLATFORMS = {
             # ("HTTP URL: Returned in upload_url", "HTTP Method: PUT") and in
             # a note warning not to drop the query parameters.
             "/upload/": answers({}),
+            # ANALYTICS HAS TO RESOLVE THE HANDLE FIRST, and TikTok is the
+            # only platform here that works this way. Publishing answers a
+            # PUBLISH ID - "v_pub_file~v2-1.123456789" above - not a video id,
+            # and that is what gets stored. The metrics endpoint accepts only
+            # the final 19-digit video id, so the collector asks the publish
+            # status endpoint what the handle became.
+            #
+            # publicaly_available_post_id is spelled exactly like that in
+            # TikTok's reference. The typo is part of their contract, our
+            # provider reads that key, and correcting it here would break the
+            # thing this is meant to exercise.
+            "/post/publish/status/fetch/": answers(
+                {
+                    "data": {
+                        "status": "PUBLISH_COMPLETE",
+                        "publish_id": "v_pub_file~v2-1.123456789",
+                        "publicaly_available_post_id": ["7000000000000000000"],
+                    },
+                    "error": {"code": "ok", "message": "", "log_id": "e2e-tiktok-log"},
+                }
+            ),
+            # And then the metrics themselves, for the id that came back.
+            # Zeroes, like every other analytics answer in this file.
+            "/video/query/": answers(
+                {
+                    "data": {
+                        "videos": [
+                            {
+                                "id": "7000000000000000000",
+                                "view_count": 0,
+                                "like_count": 0,
+                                "comment_count": 0,
+                                "share_count": 0,
+                            }
+                        ]
+                    },
+                    "error": {"code": "ok", "message": "", "log_id": "e2e-tiktok-log"},
+                }
+            ),
         },
     },
     "youtube": {
@@ -740,6 +836,15 @@ PLATFORMS = {
                     "status": {"privacyStatus": "public", "embeddable": True, "license": "youtube"},
                 },
             ),
+            # THE CHANNEL'S OWN ANALYTICS, on a different host again
+            # (youtubeanalytics.googleapis.com) and answered as rows under
+            # column headers. No rows is a channel with nothing to report.
+            "/v2/reports": answers({"kind": "youtubeAnalytics#resultTable", "columnHeaders": [], "rows": []}),
+            # AND THE COMMENTS the inbox reads, which for YouTube are comment
+            # THREADS across the whole channel rather than messages. Empty for
+            # the same reason as every other inbox here: it covers the call
+            # and the parse, and nothing about reading a comment.
+            "/commentThreads": answers({"kind": "youtube#commentThreadListResponse", "items": []}),
             "/channels": answers(
                 {
                     "items": [
@@ -768,6 +873,12 @@ PLATFORMS = {
             # platform call.
             "/boards": answers({"items": [{"id": "e2e-board-1", "name": "Coffee"}]}),
             "/pins": answers({"id": "e2e-pin-1"}),
+            # A PIN'S OWN ANALYTICS, asked for by the collector with a metric
+            # list and a date range wide enough to catch anything. Pinterest
+            # answers a dict keyed by metric under "all"; zeroes here for the
+            # same reason as everywhere else in this file - the collection is
+            # what is covered, not the arithmetic.
+            "/analytics": answers({"all": {"IMPRESSION": 0, "PIN_CLICK": 0, "SAVE": 0, "OUTBOUND_CLICK": 0}}),
             "/user_account": answers(
                 {
                     "id": "e2e-pinner",
@@ -810,6 +921,19 @@ PLATFORMS = {
             "/token": A_TOKEN,
             "/accounts": answers({"accounts": [{"name": "accounts/99887766"}]}),
             "/localPosts": answers({"name": "accounts/99887766/locations/12345/localPosts/1", "searchUrl": ""}),
+            # AND THE POST READ BACK BY NAME, which is how analytics collects
+            # for this platform - it re-fetches the localPost rather than
+            # asking a metrics endpoint. Listed after the row above because
+            # that one ends at /localPosts and this one carries the id.
+            "/localPosts/1": answers(
+                {
+                    "name": "accounts/99887766/locations/12345/localPosts/1",
+                    "languageCode": "en",
+                    "summary": A_POST_TO_PUBLISH_NOW,
+                    "state": "LIVE",
+                    "searchUrl": "",
+                }
+            ),
             "/locations": answers(
                 {
                     "locations": [
@@ -954,6 +1078,12 @@ PLATFORMS = {
                 {"id": "1", "url": "https://mastodon.social/@brightbean_test/1", "content": ""}
             ),
             "/api/v2/media": answers({"id": "1", "type": "image", "url": "", "preview_url": ""}),
+            # THE INBOX. Mastodon has no direct-message endpoint: the inbox
+            # reads NOTIFICATIONS filtered to mentions, favourites and
+            # boosts. An empty ARRAY - not an object - is what this endpoint
+            # answers when there is nothing, and getting that shape wrong
+            # would be a parse error rather than an empty inbox.
+            "/api/v1/notifications": answers([]),
             "/api/v1/accounts/verify_credentials": answers(
                 {
                     "id": "1",
@@ -1008,6 +1138,19 @@ PLATFORMS = {
                         "mimeType": "image/png",
                         "size": 2338,
                     }
+                }
+            ),
+            # BLUESKY'S SESSION IS SHORT-LIVED, so the account health check
+            # renews it rather than letting it lapse - the engine's own
+            # comment says the accessJwt expires after a few hours and must be
+            # refreshed before each publish. Found by running the background
+            # worker: nothing else in this suite lives long enough to need it.
+            "/xrpc/com.atproto.server.refreshSession": answers(
+                {
+                    "accessJwt": "e2e-access-jwt-renewed",
+                    "refreshJwt": "e2e-refresh-jwt-renewed",
+                    "handle": "brightbean-test.bsky.social",
+                    "did": "did:plc:e2ee2ee2ee2ee2ee2ee2",
                 }
             ),
             # And the session is then asked who it belongs to - the handle a
@@ -1592,13 +1735,18 @@ class TestOneProviderAllTheWay:
         choose_the_channel(a_page, a_journey, spec)
         write_the_post(a_page, a_journey, spec, A_POST_TO_PUBLISH_NOW)
 
-        # THE FIRST COMMENT, WHERE THE PRODUCT OFFERS ONE. The field appears
-        # beside the caption only for the platforms whose accounts report they
-        # support it, so its PRESENCE is the product telling us whether this
-        # post can carry one - which is why that is what is asked, rather than
-        # a list of platform names kept in this file and going stale.
-        the_first_comment = a_page.get_by_placeholder("First comment posted after the main post")
-        this_platform_takes_a_first_comment = the_first_comment.count() > 0
+        # THE FIRST COMMENT, WHERE THE PRODUCT OFFERS ONE. Asked of the screen
+        # rather than kept as a list of platform names in this file, which
+        # would go stale the day an account's capabilities change.
+        #
+        # VISIBLE, not merely PRESENT. The textarea is in the page for every
+        # platform and shown only for those whose account reports it supports
+        # one - so counting it found the field everywhere, and four platforms
+        # then spent thirty seconds each trying to type into something nobody
+        # can see. What a person can do with the screen is the question; what
+        # is in the DOM is not.
+        the_first_comment = a_page.get_by_placeholder("First comment posted after the main post").first
+        this_platform_takes_a_first_comment = the_first_comment.is_visible()
         if this_platform_takes_a_first_comment:
             the_first_comment.fill(A_FIRST_COMMENT)
             a_journey(a_page, "the-first-comment-is-written")
@@ -2118,3 +2266,43 @@ class TestOneProviderAllTheWay:
         a_page.wait_for_load_state("networkidle")
         a_journey(a_page, "the-queue-after-the-refusal")
         expect(a_page.get_by_role("main").get_by_text(AN_ARTICLE_NOBODY_TITLED[:14])).to_have_count(0)
+
+    def test_10_the_deferred_work_finishes_and_asked_for_nothing_unpredicted(self, a_page, a_journey, endpoints, spec):
+        """Drain the background queue to quiet, and read what it reached for.
+
+        THE LAST STEP, ON PURPOSE. Deferred work does not belong to the step
+        that triggered it. The engine schedules a first comment; the inbox
+        syncs on a repeat; analytics collects on a repeat - and the worker
+        runs whatever is DUE, which by now includes jobs belonging to every
+        account this suite has connected, in a database it never resets.
+
+        So that traffic used to surface against whichever platform happened to
+        be on screen when the worker next ran: INSTAGRAM'S ANALYTICS FAILED
+        THREADS' PUBLISH STEP. True, useless, and pointing at the wrong thing.
+        This is where it belongs instead, and a failure here names the job
+        rather than the bystander.
+
+        WHAT IT ASSERTS is the one honest question the wire can answer: once
+        the deferred work has run, was any of it reaching for something this
+        suite does not answer? Every entry is a feature running unwatched -
+        and running unwatched is precisely how the first comment came to be
+        enqueued on every publish for months and delivered on none.
+
+        The worker's own exit code is not consulted, here or anywhere, for the
+        reason let_the_background_work_happen gives and
+        requirements/background-work.md states about production: read the
+        work, never the process.
+        """
+        # Longer than a step's own drain. That one exists to get a particular
+        # job done; this one is meant to reach the END of the queue - and a
+        # non-empty queue is normal even then, because recurring tasks
+        # re-queue themselves as they complete. Depth is not the signal.
+        let_the_background_work_happen(seconds=10)
+        a_journey(a_page, "after-the-deferred-work-has-run")
+
+        unpredicted = "\n  ".join(endpoints.unexpected)
+        assert endpoints.unexpected == [], (
+            "the deferred work called endpoints this suite does not answer, so those jobs "
+            "failed where nobody was looking - inbox sync, analytics collection or a first "
+            f"comment:\n  {unpredicted}"
+        )
