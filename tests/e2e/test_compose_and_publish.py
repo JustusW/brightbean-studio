@@ -2024,11 +2024,44 @@ class TestOneProviderAllTheWay:
         # AND IT DREW. Being on the page is not enough - videoWidth and
         # naturalWidth stay 0 until the browser has decoded a frame out of
         # what the application served, which is the difference between a
-        # thumbnail and a thumbnail-shaped hole. This is also what makes the
-        # wait honest: it ends when the file is really there.
+        # thumbnail and a thumbnail-shaped hole.
         a_page.wait_for_function(
             "element => (element.videoWidth || element.naturalWidth || 0) > 0",
             arg=the_thumbnail.element_handle(),
+            timeout=UPLOAD_PATIENCE,
+        )
+
+        # AND THE PREVIEW SHOWS IT, WHICH IS THE ONE THAT MATTERS.
+        #
+        # THE STRIP IS NOT EVIDENCE THAT THE APPLICATION HAS THE FILE. It is
+        # rendered from the upload's own response, so it says the browser sent
+        # something and got HTML back. The PREVIEW PANE is rendered by the
+        # server from the post - or, when there is no post yet, from the
+        # PENDING-MEDIA SESSION. So the preview showing the attachment is the
+        # application stating that it still holds it, and it is the only such
+        # statement anywhere on the screen.
+        #
+        # THIS IS THE PASS/FAIL DIFFERENCE, MEASURED. A run where tiktok's
+        # publish failed showed the strip with the video and the preview
+        # reading "Upload a video"; runs that passed showed the video in both,
+        # same code, same settle, same step. The post then published with no
+        # media at all and the provider refused it - "TikTok only supports
+        # VIDEO posts" - three retries later. Waiting for the strip alone
+        # walked straight past that.
+        #
+        # Counted rather than located, because the preview's media carries
+        # alt="" and has no accessible name to ask for. The uploaded file
+        # appearing TWICE - once in the strip, once in the preview - is the
+        # same thing a person sees, and it needs no knowledge of the markup
+        # beyond "the same file, in two places".
+        a_page.wait_for_function(
+            """(stem) => {
+                const showing = [...document.querySelectorAll('video, img')]
+                    .filter((el) => (el.currentSrc || el.getAttribute('src') || '').includes(stem));
+                return showing.length >= 2
+                    && showing.every((el) => (el.videoWidth || el.naturalWidth || 0) > 0);
+            }""",
+            arg=Path(attaching).stem,
             timeout=UPLOAD_PATIENCE,
         )
 
