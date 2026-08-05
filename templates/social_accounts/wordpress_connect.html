@@ -14,8 +14,31 @@
             </div>
             <h2 class="text-xl font-semibold text-stone-900">Connect WordPress</h2>
         </div>
-        <p class="text-sm text-stone-500">Publishes to your own WordPress site through its REST API, using an application password rather than the account's real one.</p>
+        <p class="text-sm text-stone-500">Publishes to your own WordPress site. Two things have to exist on the WordPress side first &mdash; the second one is easy to miss.</p>
     </div>
+
+    {% comment %}
+    THE APPLICATION PASSWORD IS A SEPARATE STEP AND IT IS NOT OBVIOUS.
+    Creating the user is the part people expect; that they must then
+    generate a credential, on a different part of the profile screen, is
+    the part they do not. Saying it in helper text under the field was not
+    enough - it has to be stated before the form, as steps, or it reads as
+    "type your password here" and fails.
+    {% endcomment %}
+    <ol class="mb-6 space-y-3 text-sm text-stone-600">
+        <li class="flex gap-3">
+            <span class="flex-shrink-0 w-6 h-6 rounded-full bg-orange-100 text-orange-700 text-xs font-bold flex items-center justify-center">1</span>
+            <span><strong class="text-stone-900">Create a WordPress user</strong> with the <strong>Author</strong> or <strong>Editor</strong> role &mdash; not Administrator. Posts will appear as written by this user.</span>
+        </li>
+        <li class="flex gap-3">
+            <span class="flex-shrink-0 w-6 h-6 rounded-full bg-orange-100 text-orange-700 text-xs font-bold flex items-center justify-center">2</span>
+            <span><strong class="text-stone-900">Generate an application password for that user.</strong> Log in as them, go to <em>Users &rarr; Profile</em>, scroll to <em>Application Passwords</em>, give it a name, and press Add. WordPress shows the password <strong>once</strong> &mdash; copy it then.</span>
+        </li>
+        <li class="flex gap-3">
+            <span class="flex-shrink-0 w-6 h-6 rounded-full bg-orange-100 text-orange-700 text-xs font-bold flex items-center justify-center">3</span>
+            <span>Paste all three below. The application password is <strong>not</strong> the user's own password.</span>
+        </li>
+    </ol>
 
     <form method="post" action="{% url 'social_accounts:connect_wordpress' workspace_id=workspace_id %}" class="space-y-5">
         {% csrf_token %}

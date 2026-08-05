@@ -718,12 +718,24 @@ def connect_wordpress(request, workspace_id):
         detail = str(exc).strip()
         hint = ""
         if "rest_not_logged_in" in detail:
+            # WordPress answers this when it did not ACCEPT the credential
+            # as an application password - including when the value is a
+            # perfectly good account password, or when none has been
+            # generated at all. It does NOT say "wrong password", which is
+            # what makes it so misleading: it reads as "no credentials
+            # arrived", and that sent an hour down the wrong path chasing a
+            # stripped Authorization header. Creating the WordPress user is
+            # the step people take; generating the application password is
+            # the step they miss.
             hint = (
-                " That code means WordPress received NO credentials, not that "
-                "yours are wrong — usually the web server strips the "
-                "Authorization header before PHP sees it. Adding "
-                "'SetEnvIf Authorization \"(.*)\" HTTP_AUTHORIZATION=$1' to "
-                ".htaccess is the usual fix."
+                " WordPress answers that when the credential was not accepted "
+                "as an APPLICATION PASSWORD — most often because none has been "
+                "created yet. Creating the user is not enough: log in as that "
+                "user, go to Users → Profile → Application Passwords, add one, "
+                "and paste the value it shows you once. It is NOT the user's "
+                "own password. (If an application password is genuinely in use "
+                "and this persists, the host may be stripping the Authorization "
+                "header — 'CGIPassAuth On' in .htaccess is the usual fix.)"
             )
         elif "incorrect_password" in detail or "invalid_username" in detail:
             hint = (
