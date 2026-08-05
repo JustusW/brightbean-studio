@@ -429,6 +429,31 @@ _INSTAGRAM_LOGIN_CREDENTIALS = {
     "app_id": env("PLATFORM_INSTAGRAM_APP_ID", default=""),
     "app_secret": env("PLATFORM_INSTAGRAM_APP_SECRET", default=""),
 }
+# THREADS HAS ITS OWN APP ID, AND IT IS NOT THE FACEBOOK ONE.
+#
+# MEASURED, not inferred: sending the Facebook App ID to
+# https://www.threads.com/oauth/authorize is refused with
+#
+#   {"error_message": "Authorization Failed: No app ID was sent with
+#    the request.", "error_code": 4476002}
+#
+# which is a misleading string for "that is not a Threads app ID". The
+# Meta dashboard issues a separate pair under the Threads use case -
+# "App-ID von Threads" / "App-Geheimcode von Threads" - exactly as the
+# Instagram API use case issues its own above. Threads was mapped onto
+# _META_CREDENTIALS, so the connect could never have worked for anyone.
+#
+# The README states that Facebook, Instagram and Threads all share one
+# set of Meta credentials. That is true of the APP; it is not true of
+# the credentials the Threads OAuth endpoint accepts.
+#
+# FALLS BACK to the Meta pair when the Threads variables are unset, so
+# an existing deployment that has not been told about this keeps
+# whatever behaviour it had rather than losing its configuration.
+_THREADS_CREDENTIALS = {
+    "app_id": env("PLATFORM_THREADS_APP_ID", default="") or _META_CREDENTIALS["app_id"],
+    "app_secret": env("PLATFORM_THREADS_APP_SECRET", default="") or _META_CREDENTIALS["app_secret"],
+}
 _LINKEDIN_LEGACY_CLIENT_ID = env("PLATFORM_LINKEDIN_CLIENT_ID", default="")
 _LINKEDIN_LEGACY_CLIENT_SECRET = env("PLATFORM_LINKEDIN_CLIENT_SECRET", default="")
 
@@ -469,7 +494,9 @@ PLATFORM_CREDENTIALS_FROM_ENV = {
     # Meta platforms - Facebook, Instagram, and Threads share the same app
     "facebook": _META_CREDENTIALS,
     "instagram": _META_CREDENTIALS,
-    "threads": _META_CREDENTIALS,
+    # NOT _META_CREDENTIALS - Threads issues its own app id and secret.
+    # See the comment above _THREADS_CREDENTIALS.
+    "threads": _THREADS_CREDENTIALS,
     # Instagram (Direct) - uses Instagram Login with separate Instagram App credentials.
     # Despite the platform key, this targets Professional (Business/Creator) IG accounts
     # without requiring a linked Facebook Page. See providers/instagram_login.py.
