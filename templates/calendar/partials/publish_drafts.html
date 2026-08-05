@@ -1,11 +1,17 @@
 {% comment %}
 Drafts tab partial for the Publish page.
-Shows all draft platform posts in a table. Loaded via HTMX into #tab-content.
+Loaded via HTMX into #tab-content.
+
+ONE ROW PER POST, not one per PlatformPost. A draft aimed at four accounts
+is one draft; this listed it four times and every row opened the composer
+with ?account=<id>, which is the single-account composer - so the same
+draft could not be edited as a whole from here at all. The platform column
+carries every account the draft targets instead.
 {% endcomment %}
 {% load tz %}
 
 <div x-data{% if is_htmx %} class="tab-slide-in"{% endif %}>
-    {% if platform_posts %}
+    {% if posts %}
     <table class="w-full">
         <thead>
             <tr class="border-b border-stone-200 text-left">
@@ -18,11 +24,11 @@ Shows all draft platform posts in a table. Loaded via HTMX into #tab-content.
             </tr>
         </thead>
         <tbody>
-            {% for pp in platform_posts %}
+            {% for post in posts %}
             <tr class="border-b border-stone-100 hover:bg-stone-50 transition-colors duration-100 cursor-pointer"
-                @click="window.location='{% url 'composer:compose_edit' workspace_id=workspace.id post_id=pp.post_id %}?account={{ pp.social_account_id }}'">
+                @click="window.location='{% url 'composer:compose_edit' workspace_id=workspace.id post_id=post.id %}'">
                 <td class="px-4 py-3">
-                    {% with first_att=pp.post.media_attachments.all.0 %}
+                    {% with first_att=post.media_attachments.all.0 %}
                     {% if first_att %}
                     <div class="w-10 h-10 rounded-lg overflow-hidden bg-stone-100 flex-shrink-0 relative">
                         {% if first_att.media_asset.thumbnail %}
@@ -39,9 +45,9 @@ Shows all draft platform posts in a table. Loaded via HTMX into #tab-content.
                             </div>
                         </div>
                         {% endif %}
-                        {% if pp.post.media_attachments.count > 1 %}
+                        {% if post.media_attachments.count > 1 %}
                         <div class="absolute bottom-0 right-0 bg-black/60 text-white text-[9px] font-bold px-1 rounded-tl">
-                            +{{ pp.post.media_attachments.count|add:"-1" }}
+                            +{{ post.media_attachments.count|add:"-1" }}
                         </div>
                         {% endif %}
                     </div>
@@ -53,27 +59,40 @@ Shows all draft platform posts in a table. Loaded via HTMX into #tab-content.
                     {% endwith %}
                 </td>
                 <td class="px-4 py-3 text-sm text-stone-600 max-w-xs truncate">
-                    {{ pp.post.title|default:pp.post.caption_snippet|default:"(no caption)" }}
+                    {{ post.title|default:post.caption_snippet|default:"(no caption)" }}
                 </td>
                 <td class="px-4 py-3">
-                    <div class="flex items-center gap-1.5">
-                        <span class="w-5 h-5 rounded-[5px] flex items-center justify-center">
-                            {% include "partials/_platform_icon.html" with platform=pp.social_account.platform size="sm" %}
+                    {% comment %}
+                    EVERY account this draft targets, on one row. Wraps rather
+                    than truncating: which channels a post is going to is the
+                    thing this column exists to answer.
+                    {% endcomment %}
+                    <div class="flex items-center gap-x-3 gap-y-1 flex-wrap">
+                        {% for pp in post.draft_platform_posts %}
+                        <span class="inline-flex items-center gap-1.5">
+                            <span class="w-5 h-5 rounded-[5px] flex items-center justify-center">
+                                {% include "partials/_platform_icon.html" with platform=pp.social_account.platform size="sm" %}
+                            </span>
+                            <span class="text-xs text-stone-500">{{ pp.social_account.account_name|default:pp.social_account.account_handle }}</span>
                         </span>
-                        <span class="text-xs text-stone-500">{{ pp.social_account.account_name|default:pp.social_account.account_handle }}</span>
+                        {% endfor %}
                     </div>
                 </td>
                 <td class="px-4 py-3 text-xs text-stone-500">
-                    {{ pp.post.author.display_name|default:"-" }}
+                    {{ post.author.display_name|default:"-" }}
                 </td>
                 <td class="px-4 py-3 text-xs text-stone-500 tabular-nums whitespace-nowrap">
-                    {{ pp.post.updated_at|timesince }} ago
-                    {% if pp.post.proposed_publish_at %}
-                    <span class="block text-[0.6875rem] text-orange-500" title="Proposed publishing time">Proposed Publishing {% timezone display_timezone %}{{ pp.post.proposed_publish_at|date:"M j, g:i A" }}{% endtimezone %}</span>
+                    {{ post.updated_at|timesince }} ago
+                    {% if post.proposed_publish_at %}
+                    <span class="block text-[0.6875rem] text-orange-500" title="Proposed publishing time">Proposed Publishing {% timezone display_timezone %}{{ post.proposed_publish_at|date:"M j, g:i A" }}{% endtimezone %}</span>
                     {% endif %}
                 </td>
                 <td class="px-4 py-3 text-right" @click.stop>
-                    {% include "calendar/partials/_post_actions_menu.html" with post_id=pp.post_id account_id=pp.social_account_id %}
+                    {% comment %}
+                    No account_id: Edit and Delete act on the WHOLE draft here,
+                    which is what a row now represents.
+                    {% endcomment %}
+                    {% include "calendar/partials/_post_actions_menu.html" with post_id=post.id account_id="" %}
                 </td>
             </tr>
             {% endfor %}

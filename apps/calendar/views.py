@@ -350,7 +350,14 @@ def _get_publish_context(workspace, request):
         "timezone_choices": tz_list,
         "workspace_timezone": ws_tz,
         "queue_count": PlatformPost.objects.filter(post__workspace_id=workspace.id, status="scheduled").count(),
-        "drafts_count": PlatformPost.objects.filter(post__workspace_id=workspace.id, status="draft").count(),
+        # DISTINCT POSTS, so the tab's badge agrees with the rows beneath it.
+        # Counting PlatformPosts made one draft aimed at four accounts read
+        # as "4" — the same mistake the tab itself was making. Approvals
+        # already counts this way and says so.
+        "drafts_count": Post.objects.for_workspace(workspace.id)
+        .filter(platform_posts__status="draft")
+        .distinct()
+        .count(),
         # Distinct posts (one row per post in the redesigned tab), incl. on_hold —
         # matches the tab's "All" pill count.
         "approvals_count": Post.objects.for_workspace(workspace.id)
@@ -452,14 +459,53 @@ def _get_tab_context(request, workspace, tab: str) -> dict:
         return {**base_ctx, "platform_posts": platform_posts[:200]}
 
     if tab == "drafts":
-        platform_posts = (
-            PlatformPost.objects.filter(post__workspace_id=workspace.id, status="draft")
-            .select_related("post__author", "social_account")
-            .prefetch_related("post__media_attachments__media_asset")
-            .order_by("-post__updated_at")
+        # ONE ROW PER POST, not one per PlatformPost.
+        #
+        # A draft aimed at four accounts is ONE draft. This tab rendered a
+        # row per child, so it appeared four times over - and every one of
+        # those rows opened the composer with ``?account=<id>``, which is the
+        # SINGLE-ACCOUNT composer: it shows one chip and a save there touches
+        # only that child. So the list said "four drafts" and then made it
+        # impossible to edit them as one. The shepherd, looking at it: "this
+        # isn't four fucking drafts, it's one draft."
+        #
+        # The composer's own drafts page (composer/drafts_list.html) always
+        # did this correctly - one row per Post with a badge per platform.
+        # This tab was the odd one out.
+        #
+        # Same Exists-subquery shape as the approvals tab below, for the same
+        # reason spelled out there: status and channel must be satisfied by
+        # the SAME child row, and chaining .filter(platform_posts__...)
+        # spawns a fresh join per call.
+        from django.db.models import Exists, OuterRef, Prefetch
+
+        draft_children = PlatformPost.objects.filter(post_id=OuterRef("pk"), status="draft")
+        channel = request.GET.get("channel")
+        if channel:
+            draft_children = draft_children.filter(social_account_id=channel)
+
+        posts_qs = (
+            Post.objects.for_workspace(workspace.id)
+            .filter(Exists(draft_children))
+            .select_related("author")
+            .prefetch_related(
+                # Only the DRAFT children: a post can have a published sibling,
+                # and listing it here would claim it is still a draft.
+                Prefetch(
+                    "platform_posts",
+                    queryset=PlatformPost.objects.filter(status="draft").select_related("social_account"),
+                    to_attr="draft_platform_posts",
+                ),
+                "media_attachments__media_asset",
+            )
+            .order_by("-updated_at")
         )
-        platform_posts = _apply_pp_publish_filters(platform_posts, request)
-        return {**base_ctx, "platform_posts": platform_posts[:200]}
+        # Tag is a Post-level attribute and cannot cross child rows, so it is
+        # applied directly - same as the approvals tab.
+        tag = request.GET.get("tag")
+        if tag:
+            posts_qs = posts_qs.filter(tags__contains=[tag])
+        return {**base_ctx, "posts": posts_qs[:200]}
 
     if tab == "sent":
         platform_posts = (
@@ -583,12 +629,12 @@ def _get_tab_context(request, workspace, tab: str) -> dict:
 def calendar_view(request, workspace_id):
     """Main publish page - renders calendar or list mode."""
     workspace = _get_workspace(request, workspace_id)
-    has_connected_accounts = SocialAccount.objects.filter(
-        workspace=workspace,
-        connection_status=SocialAccount.ConnectionStatus.CONNECTED,
-    ).exists()
-    default_mode = "calendar" if has_connected_accounts else "list"
-    mode = request.GET.get("mode", default_mode)
+    # THE LIST IS THE DEFAULT. The calendar is the better view once there is
+    # a schedule to look at; day to day the question is "what have we got",
+    # and that is a list. It used to depend on whether any channel was
+    # connected, which meant the view changed under you the moment you
+    # attached one.
+    mode = request.GET.get("mode", "list")
     active_tab = request.GET.get("tab", "queue")
     view_type = request.GET.get("view", "month")
     target_date = _parse_date(request.GET.get("date"))
