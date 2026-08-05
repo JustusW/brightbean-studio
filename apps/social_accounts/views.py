@@ -24,7 +24,12 @@ from apps.credentials.models import PlatformCredential, resolve_platform_credent
 from apps.members.decorators import require_permission
 
 from .models import MastodonAppRegistration, PlatformVisibility, SocialAccount
-from .oauth_aliases import from_url_slug, redirect_uri_from_request, to_url_slug
+from .oauth_aliases import (
+    from_url_slug,
+    public_redirect_base,
+    redirect_uri_from_request,
+    to_url_slug,
+)
 from .oauth_pkce import issue_pkce_verifier, pkce_kwargs
 
 logger = logging.getLogger(__name__)
@@ -107,7 +112,23 @@ def _build_redirect_uri(request, platform):
     from django.urls import reverse
 
     url_slug = to_url_slug(platform)
-    return request.build_absolute_uri(reverse("social_accounts:oauth_callback", kwargs={"platform": url_slug}))
+    path = reverse("social_accounts:oauth_callback", kwargs={"platform": url_slug})
+
+    # OAUTH_REDIRECT_BASE, when set, names a public https endpoint that
+    # exists only to bounce the browser back here with the query string
+    # intact. Providers refuse a redirect URI that is not https and exempt
+    # only localhost, so a deployment on a private network has no URI it
+    # may register — this gives it one without putting the application on
+    # the public internet.
+    #
+    # It must be applied HERE as well as in redirect_uri_from_request:
+    # the URI sent at authorization and the one replayed at token exchange
+    # have to match exactly, and half a change would fail every exchange
+    # with a redirect_uri_mismatch that names neither side.
+    base = public_redirect_base()
+    if base:
+        return f"{base}{path}"
+    return request.build_absolute_uri(path)
 
 
 def _sign_state(workspace_id, platform, user_id, nonce):

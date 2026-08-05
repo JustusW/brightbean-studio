@@ -37,6 +37,29 @@ def from_url_slug(slug: str) -> str:
     return URL_ALIAS_TO_PLATFORM.get(slug, slug)
 
 
+def public_redirect_base() -> str:
+    """The origin OAuth providers redirect back to, when it is not us.
+
+    EVERY PROVIDER WORTH ATTACHING REFUSES A NON-HTTPS REDIRECT URI, and
+    exempts only localhost — Google says so in as many words. A deployment
+    reached over a private network therefore has no URI it is allowed to
+    register, however healthy it is.
+
+    ``OAUTH_REDIRECT_BASE`` names a small public https endpoint that does
+    nothing but redirect the browser onward to this application, query
+    string intact. The browser arrives here carrying the session it
+    already had, so the nonce check still works; the provider only ever
+    saw the public name.
+
+    Set it and BOTH sides use it — the URI sent at authorization and the
+    one replayed at token exchange, which must match exactly. Leave it
+    unset and everything behaves exactly as before.
+    """
+    from django.conf import settings
+
+    return (getattr(settings, "OAUTH_REDIRECT_BASE", "") or "").rstrip("/")
+
+
 def redirect_uri_from_request(request) -> str:
     """Rebuild the OAuth redirect URI from the incoming callback request.
 
@@ -48,5 +71,12 @@ def redirect_uri_from_request(request) -> str:
     TikTok's ``tiktok`` → ``social1`` rename) and any auth started before
     the deploy would otherwise rebuild to the new path and fail TikTok's
     exact-match check.
+
+    With ``OAUTH_REDIRECT_BASE`` set the path is kept for exactly that
+    reason and only the origin is replaced, so the exact-match property
+    holds against the public endpoint instead of against this host.
     """
+    base = public_redirect_base()
+    if base:
+        return f"{base}{request.path}"
     return request.build_absolute_uri(request.path)

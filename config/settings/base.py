@@ -23,6 +23,29 @@ DEBUG = env("DEBUG")
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
 APP_URL = env("APP_URL")
 
+# WHERE OAUTH PROVIDERS REDIRECT BACK TO, when that cannot be this host.
+#
+# Every provider worth attaching refuses a redirect URI that is not https
+# and exempts only localhost — Google states it outright. A deployment
+# reached over a private network therefore has no URI it is permitted to
+# register, no matter how healthy it is.
+#
+# Set this to a small public https endpoint whose only job is to bounce
+# the browser onward to this application with the query string intact.
+# The provider only ever sees the public name; the browser arrives here
+# carrying the session it already had, so the callback's nonce check is
+# unaffected. Nothing else about the application becomes public.
+#
+# It is deliberately SEPARATE from APP_URL. APP_URL is the address the
+# outside world fetches media from, and conflating the two would drag the
+# whole media library onto the public endpoint. Empty means "use this
+# host", which is the ordinary case.
+#
+# See apps/social_accounts/oauth_aliases.public_redirect_base — and note
+# that both the authorization URI and the token-exchange URI consult it,
+# because OAuth requires those two to match exactly.
+OAUTH_REDIRECT_BASE = env("OAUTH_REDIRECT_BASE", default="")
+
 # Application definition
 
 DJANGO_APPS = [
