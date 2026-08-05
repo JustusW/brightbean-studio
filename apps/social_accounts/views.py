@@ -703,12 +703,39 @@ def connect_wordpress(request, workspace_id):
             instance_url=site_url,
         )
         messages.success(request, f"Connected {profile.name} on {site_url}.")
-    except Exception:
+    except Exception as exc:
         logger.exception("WordPress connection failed for %s", site_url)
+        # SHOW WHAT WORDPRESS ACTUALLY SAID. The first version of this
+        # returned only friendly advice, and the advice was wrong: the site
+        # answered `rest_not_logged_in`, which means it never saw the
+        # Authorization header at all - usually Apache stripping it before
+        # PHP - and no amount of re-checking the password would have fixed
+        # it. The real message was in the container log, where a person
+        # connecting an account cannot reach.
+        #
+        # These are REST error codes and HTTP statuses from the operator's
+        # own site; the credential is never echoed.
+        detail = str(exc).strip()
+        hint = ""
+        if "rest_not_logged_in" in detail:
+            hint = (
+                " That code means WordPress received NO credentials, not that "
+                "yours are wrong — usually the web server strips the "
+                "Authorization header before PHP sees it. Adding "
+                "'SetEnvIf Authorization \"(.*)\" HTTP_AUTHORIZATION=$1' to "
+                ".htaccess is the usual fix."
+            )
+        elif "incorrect_password" in detail or "invalid_username" in detail:
+            hint = (
+                " The username or application password was rejected. Note "
+                "that an application password is not the account's own "
+                "password."
+            )
+        elif "rest_forbidden" in detail or "403" in detail:
+            hint = " The credential authenticated but may not publish posts."
         return _back(
-            "Could not connect to that WordPress site. Check the address, the "
-            "username, and that the application password has not been revoked "
-            "— and that the account may publish posts."
+            f"Could not connect to that WordPress site. It answered: "
+            f"{detail[:400]}{hint}"
         )
 
     return redirect("calendar:calendar", workspace_id=workspace_id)
