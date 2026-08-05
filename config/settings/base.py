@@ -550,6 +550,9 @@ PLATFORM_CREDENTIALS_FROM_ENV = {
     # DEV.to - per-account API key (no OAuth). The key is supplied by the user
     # at connect time, so no app-level credentials apply (same as Bluesky).
     "devto": {},
+    # WordPress - site URL plus a per-user application password, both typed
+    # at connect time. Nothing to register, so no app-level credentials.
+    "wordpress": {},
 }
 
 # Webhook verification

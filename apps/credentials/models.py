@@ -54,6 +54,10 @@ class PlatformCredential(models.Model):
         GOOGLE_BUSINESS = "google_business", "Google Business Profile"
         MASTODON = "mastodon", "Mastodon"
         DEVTO = "devto", "DEV.to"
+        # The club's own website. Application-password auth, so it needs no
+        # entry in REQUIRED_CREDENTIAL_KEYS above - like bluesky and
+        # mastodon, there are no app-level credentials to configure.
+        WORDPRESS = "wordpress", "WordPress"
 
     class TestResult(models.TextChoices):
         SUCCESS = "success", "Success"

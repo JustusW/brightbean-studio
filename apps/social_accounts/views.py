@@ -278,6 +278,8 @@ def connect_platform(request, workspace_id):
         return redirect("social_accounts:connect_mastodon", workspace_id=workspace_id)
     if platform == PlatformCredential.Platform.DEVTO:
         return redirect("social_accounts:connect_devto", workspace_id=workspace_id)
+    if platform == PlatformCredential.Platform.WORDPRESS:
+        return redirect("social_accounts:connect_wordpress", workspace_id=workspace_id)
 
     # Standard OAuth flow
     provider = _get_provider_for_platform(platform, request.org.id)
@@ -638,6 +640,81 @@ def connect_devto(request, workspace_id):
 
 
 # ------------------------------------------------------------------
+# WordPress Connect (application password, no OAuth)
+# ------------------------------------------------------------------
+
+
+@login_required
+@require_permission("manage_social_accounts")
+def connect_wordpress(request, workspace_id):
+    """Connect a WordPress site via an application password.
+
+    Three values rather than one: the site, a username, and the
+    application password WordPress issues per user. The site is stored in
+    ``instance_url`` (as Mastodon and Bluesky do) and the other two become
+    the account's token as ``username:application_password``, which is
+    exactly what HTTP Basic wants.
+    """
+    from providers.wordpress import WordPressProvider
+
+    if request.method == "GET":
+        return render(
+            request,
+            "social_accounts/wordpress_connect.html",
+            {"workspace_id": workspace_id},
+        )
+
+    site_url = WordPressProvider.normalise_site_url(request.POST.get("site_url", ""))
+    username = request.POST.get("username", "").strip()
+    app_password = request.POST.get("app_password", "").strip()
+
+    def _back(message):
+        messages.error(request, message)
+        return render(
+            request,
+            "social_accounts/wordpress_connect.html",
+            {"workspace_id": workspace_id},
+        )
+
+    if not site_url or not username or not app_password:
+        return _back("Site address, username and application password are all required.")
+
+    # SSRF: this URL is typed by a person and then fetched BY THIS SERVER.
+    # Same gate Mastodon uses, for the same reason.
+    if not _is_safe_url(site_url):
+        return _back("Invalid site address. Private or reserved addresses are not allowed.")
+
+    try:
+        provider = _get_provider_for_platform(
+            PlatformCredential.Platform.WORDPRESS,
+            request.org.id,
+            site_url=site_url,
+        )
+        token = f"{username}:{app_password}"
+        # get_profile asks with context=edit, so a credential that cannot
+        # actually write is refused HERE rather than at the first publish.
+        profile = provider.get_profile(token)
+
+        _create_or_update_account(
+            workspace_id=workspace_id,
+            platform=PlatformCredential.Platform.WORDPRESS,
+            profile=profile,
+            access_token=token,
+            instance_url=site_url,
+        )
+        messages.success(request, f"Connected {profile.name} on {site_url}.")
+    except Exception:
+        logger.exception("WordPress connection failed for %s", site_url)
+        return _back(
+            "Could not connect to that WordPress site. Check the address, the "
+            "username, and that the application password has not been revoked "
+            "— and that the account may publish posts."
+        )
+
+    return redirect("calendar:calendar", workspace_id=workspace_id)
+
+
+# ------------------------------------------------------------------
 # Mastodon Connect (instance-based OAuth)
 # ------------------------------------------------------------------
 
@@ -754,6 +831,8 @@ def reconnect(request, workspace_id, account_id):
         return redirect("social_accounts:connect_mastodon", workspace_id=workspace_id)
     if platform == PlatformCredential.Platform.DEVTO:
         return redirect("social_accounts:connect_devto", workspace_id=workspace_id)
+    if platform == PlatformCredential.Platform.WORDPRESS:
+        return redirect("social_accounts:connect_wordpress", workspace_id=workspace_id)
 
     # Standard OAuth reconnect
     provider = _get_provider_for_platform(platform, request.org.id)

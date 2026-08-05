@@ -31,6 +31,11 @@ urlpatterns = [
         views.connect_devto,
         name="connect_devto",
     ),
+    path(
+        "<uuid:workspace_id>/connect/wordpress/",
+        views.connect_wordpress,
+        name="connect_wordpress",
+    ),
     # OAuth callback (not workspace-scoped - platform redirects here)
     path(
         "callback/<str:platform>/",

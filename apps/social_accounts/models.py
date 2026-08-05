@@ -137,6 +137,9 @@ class SocialAccount(models.Model):
         "google_business": 1500,
         "mastodon": 500,
         "devto": 25000,
+        # An article on the club's own site. The limit is a sanity ceiling
+        # rather than a platform rule - WordPress imposes none.
+        "wordpress": 65535,
     }
 
     @property
@@ -175,6 +178,15 @@ class SocialAccount(models.Model):
             "title_label": "Article Title",
             "caption_label": "Body (Markdown)",
             "supports_first_comment": False,
+        },
+        # An article, so it needs a title like DEV.to - but unlike DEV.to it
+        # DOES support a first comment, because the WordPress REST API has a
+        # comments endpoint and the provider implements it.
+        "wordpress": {
+            "needs_title": True,
+            "title_max_length": 200,
+            "title_label": "Post Title",
+            "caption_label": "Body (HTML)",
         },
     }
 
@@ -227,6 +239,7 @@ class SocialAccount(models.Model):
             "google_business": "gb",
             "mastodon": "ma",
             "devto": "dv",
+            "wordpress": "wp",
         }
         return icons.get(self.platform, self.platform[:2])
 

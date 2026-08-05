@@ -82,6 +82,19 @@ def _resolve_publish_credentials(account):
                 "Bluesky PDS URL failed SSRF check for account %s",
                 account.id,
             )
+    elif platform == "wordpress" and account.instance_url:
+        from apps.common.validators import is_safe_url
+
+        # Same SSRF gate as Mastodon and Bluesky: this URL is typed by a
+        # person and then fetched BY THIS SERVER, so a private or reserved
+        # address would turn the publisher into a probe of our own network.
+        if is_safe_url(account.instance_url):
+            credentials["site_url"] = account.instance_url
+        else:
+            logger.warning(
+                "WordPress site URL failed SSRF check for account %s",
+                account.id,
+            )
     elif platform == "facebook":
         credentials["page_id"] = account.account_platform_id
     elif platform == "instagram":
