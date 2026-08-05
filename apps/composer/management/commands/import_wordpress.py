@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import sys
 import urllib.request
 from datetime import datetime, timezone as utc
 
@@ -106,8 +107,18 @@ class Command(BaseCommand):
                 f"{account.workspace_id}, not to {workspace.id}. Refusing: "
                 "this would file the club's history under another brand.")
 
-        with open(options["manifest"], encoding="utf-8") as fh:
-            manifest = json.load(fh)
+        # "-" MEANS STDIN, and that is how the control plane feeds this.
+        #
+        # The web container mounts only ./media, so a manifest written to
+        # the host's inbox is not visible in here — and putting it under
+        # media would publish the club's import manifest at
+        # files.wingert.dev, which is a silly place for it. Piping it in
+        # needs no mount, no new volume and no file left behind.
+        if options["manifest"] == "-":
+            manifest = json.load(sys.stdin)
+        else:
+            with open(options["manifest"], encoding="utf-8") as fh:
+                manifest = json.load(fh)
 
         self.stdout.write(
             f"workspace {workspace}\n"
