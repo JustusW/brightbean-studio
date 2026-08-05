@@ -46,6 +46,31 @@ APP_URL = env("APP_URL")
 # because OAuth requires those two to match exactly.
 OAUTH_REDIRECT_BASE = env("OAUTH_REDIRECT_BASE", default="")
 
+# WHERE THE PLATFORMS FETCH MEDIA FROM, when that cannot be this host.
+#
+# Instagram, Threads, Facebook and Google Business do not receive an
+# upload: they are handed an absolute URL and go and GET it with their
+# own servers. A deployment on a private network therefore publishes
+# nothing with a picture in it, and the failure names the platform
+# rather than the cause:
+#
+#   "Die Mediendatei konnte nicht von dieser URI abgerufen werden:
+#    http://<host>.ts.net:8081/media/media_library/..."   (subcode 2207052)
+#   Facebook says "Missing or invalid image file" (code 324) for the
+#   same reason, which is even less help.
+#
+# Set this to a public https origin that serves MEDIA_URL and nothing
+# else. Empty falls back to APP_URL, so a deployment that is already
+# public behaves exactly as before.
+#
+# DELIBERATELY NOT APP_URL ITSELF. APP_URL is the whole application's
+# public identity - links, the MCP endpoint, anything absolute - and
+# pointing it at a media-only host would break every one of those to fix
+# one of them. Same reasoning as OAUTH_REDIRECT_BASE above: one narrow
+# value for one narrow job, rather than making the application pretend
+# to live somewhere it does not.
+MEDIA_PUBLIC_BASE = env("MEDIA_PUBLIC_BASE", default="")
+
 # Application definition
 
 DJANGO_APPS = [

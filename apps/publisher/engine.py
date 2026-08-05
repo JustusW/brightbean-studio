@@ -373,7 +373,15 @@ class PublishEngine:
 
         first_media_type = None
         primary_video_duration = None
-        app_url = getattr(settings, "APP_URL", "").rstrip("/")
+        # MEDIA_PUBLIC_BASE, falling back to APP_URL. Instagram, Threads,
+        # Facebook and Google Business FETCH these URLs with their own
+        # servers, so on a private deployment APP_URL produces a link only
+        # this network can resolve and every media post fails with a
+        # "media could not be downloaded from this URI" that names the
+        # platform rather than the cause. See config/settings/base.py.
+        media_base = (
+            getattr(settings, "MEDIA_PUBLIC_BASE", "") or getattr(settings, "APP_URL", "")
+        ).rstrip("/")
         try:
             for pm in attachments:
                 asset = pm.media_asset
@@ -391,8 +399,9 @@ class PublishEngine:
                 # Collect the public/presigned URL for this asset
                 url = asset.file.url
                 if url.startswith("/"):
-                    # Local storage: make absolute using APP_URL
-                    url = f"{app_url}{url}"
+                    # Local storage: make absolute using the PUBLICLY
+                    # FETCHABLE base, which is not necessarily this host.
+                    url = f"{media_base}{url}"
                 media_urls.append(url)
 
                 # Download to a temp file (works with any storage backend)
