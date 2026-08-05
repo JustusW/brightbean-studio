@@ -176,6 +176,32 @@ class Command(BaseCommand):
                         post.delete()
                     pruned += 1
 
+        # AND THE PICTURES THE MANIFEST HAS STOPPED CLAIMING.
+        #
+        # Pruning posts alone leaves a real gap: the club's mascot, a
+        # visiting club's banner and a scanned invitation were all
+        # dropped from posts that STILL EXIST, so those posts are adopted
+        # untouched and the junk stays attached. Deleting the asset is
+        # what actually removes it — PostMedia cascades from it, so the
+        # picture leaves the post and the library together.
+        #
+        # Scoped to source="wordpress": nothing uploaded by a person in
+        # Brightbean carries that, and nothing here can touch it.
+        wanted = {
+            image.get("src", "")
+            for group in ("posts", "media_only", "page_content")
+            for item in manifest.get(group, [])
+            for image in item.get("images", [])
+        }
+        for asset in MediaAsset.objects.filter(workspace=workspace,
+                                               source="wordpress"):
+            if asset.source_url and asset.source_url not in wanted:
+                self.stdout.write(
+                    f"  - {asset.filename}  (no longer in the manifest)")
+                if not dry:
+                    asset.delete()
+                pruned += 1
+
         self.stdout.write(self.style.SUCCESS(
             f"\n{made} post(s) created, {adopted} already there, "
             f"{pruned} removed, {loose} loose photograph(s) added."))
