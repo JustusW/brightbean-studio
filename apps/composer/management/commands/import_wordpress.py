@@ -81,6 +81,9 @@ class Command(BaseCommand):
                             help="social account UUID to attach them to")
         parser.add_argument("--dry-run", action="store_true",
                             help="say what would happen and write nothing")
+        parser.add_argument("--prune", action="store_true",
+                            help="delete imported posts the manifest no "
+                                 "longer lists")
 
     # ------------------------------------------------------------------
 
@@ -145,9 +148,37 @@ class Command(BaseCommand):
                 if self._one_asset(image, workspace, options, dry):
                     loose += 1
 
+        # ANYTHING THIS IMPORT ONCE CREATED AND NO LONGER CLAIMS.
+        #
+        # The judgement about what IS a post lives in the manifest, and it
+        # changes: "Anfahrt über L 560" sits on the news page but is
+        # directions, and its picture — the club's hand-drawn
+        # Anfahrtskizze — had gone into the feed and the gallery among the
+        # aeroplanes. Reclassifying it upstream fixes the next import and
+        # does nothing at all about the row already in the database.
+        #
+        # So the marker works in both directions: a post carrying this
+        # import's mark whose marker is no longer in the manifest is one
+        # this import made and has since disowned. Only ever those — a
+        # post somebody wrote in Brightbean carries no marker and cannot
+        # be touched by this.
+        pruned = 0
+        if options["prune"]:
+            keep = {self._marker(i) for i in manifest.get("posts", [])}
+            for post in Post.objects.filter(
+                    workspace=workspace, internal_notes__contains=MARKER):
+                mine = next((line for line in post.internal_notes.splitlines()
+                             if line.startswith(f"{MARKER}:")), "")
+                if mine and mine not in keep:
+                    self.stdout.write(
+                        f"  - {post.title[:60]}  (no longer in the manifest)")
+                    if not dry:
+                        post.delete()
+                    pruned += 1
+
         self.stdout.write(self.style.SUCCESS(
             f"\n{made} post(s) created, {adopted} already there, "
-            f"{loose} loose photograph(s) added."))
+            f"{pruned} removed, {loose} loose photograph(s) added."))
 
     # ------------------------------------------------------------------
 
