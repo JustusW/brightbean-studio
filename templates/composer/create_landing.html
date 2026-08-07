@@ -766,7 +766,7 @@
             <button type="button" class="idea-modal-close" @click="editingIdea = null" title="Close">
                 <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
-            <form :action="editingIdea ? `/workspace/{{ workspace.id }}/ideas/${editingIdea.id}/edit/` : ''"
+            <form :action="editingIdea ? _urlFor('ideaEdit', editingIdea.id) : ''"
                   method="post"
                   enctype="multipart/form-data"
                   @submit.prevent="submitEditIdea($event)">
@@ -1175,6 +1175,52 @@ function kanbanBoard() {
         _columnMap: { {% for col in columns %}'{{ col.id }}': '{{ col.label }}'{% if not forloop.last %}, {% endif %}{% endfor %} },
         _defaultGroupId: '{% if columns %}{{ columns.0.id }}{% endif %}',
 
+        // EVERY URL REVERSED, NEVER WRITTEN BY HAND.
+        //
+        // Seven of the board's own endpoints were built by string
+        // concatenation - '/workspace/{{ workspace.id }}/ideas/' + id +
+        // '/delete/' - and that is only correct while Django is served at
+        // the root of its host. Under a script prefix (FORCE_SCRIPT_NAME,
+        // which this deployment uses) a hand-written path omits the
+        // prefix, so the request never reaches Django at all: it lands on
+        // whatever else is served at that origin.
+        //
+        // THE TWO FAILURES LOOK NOTHING ALIKE, which is why this went
+        // unnoticed for so long. A POST answered by something that only
+        // serves GET comes back 405 - loud, and that is how the delete
+        // button was reported. But `move` and `groups/reorder` are
+        // fire-and-forget fetches behind an optimistic UI: the card moves
+        // on screen, nothing is saved, and nobody finds out until the
+        // page is reloaded.
+        //
+        // {% templatetag openblock %} url {% templatetag closeblock %}
+        // carries the prefix because Django builds it; concatenation
+        // cannot, because the string in this file has no idea where the
+        // application is mounted. So the id-bearing routes are reversed
+        // ONCE against a placeholder and the real id is substituted -
+        // which keeps Django's URLconf the single source of these paths
+        // even for ids that only exist at runtime.
+        _idPlaceholder: '00000000-0000-0000-0000-000000000000',
+        _urls: {
+            ideaEdit: '{% url "composer:idea_edit" workspace_id=workspace.id idea_id="00000000-0000-0000-0000-000000000000" %}',
+            ideaDelete: '{% url "composer:idea_delete" workspace_id=workspace.id idea_id="00000000-0000-0000-0000-000000000000" %}',
+            ideaMove: '{% url "composer:idea_move" workspace_id=workspace.id idea_id="00000000-0000-0000-0000-000000000000" %}',
+            ideaCreatePost: '{% url "composer:idea_create_post" workspace_id=workspace.id idea_id="00000000-0000-0000-0000-000000000000" %}',
+            groupDelete: '{% url "composer:idea_group_delete" workspace_id=workspace.id group_id="00000000-0000-0000-0000-000000000000" %}',
+            groupReorder: '{% url "composer:idea_group_reorder" workspace_id=workspace.id %}',
+            compose: '{% url "composer:compose" workspace_id=workspace.id %}',
+        },
+
+        // `name` is a key of _urls; `id` is substituted for the
+        // placeholder when that route carries one. Returns '' rather than
+        // a half-built path for an unknown name, so a typo here fails as
+        // a refused request instead of a POST to the wrong application.
+        _urlFor(name, id) {
+            var template = this._urls[name] || '';
+            if (!template) return '';
+            return id ? template.replace(this._idPlaceholder, id) : template;
+        },
+
         // Template data for detail modal
         _templates: {
             {% for tpl in builtin_templates %}
@@ -1200,7 +1246,7 @@ function kanbanBoard() {
             var tpl = this.viewingTemplate;
             var body = tpl.body || tpl.description;
             this.viewingTemplate = null;
-            window.location.href = '/workspace/{{ workspace.id }}/compose/?template=' + tpl.id;
+            window.location.href = this._urlFor('compose') + '?template=' + tpl.id;
         },
 
         copyTemplateBody() {
@@ -1719,7 +1765,7 @@ function kanbanBoard() {
 
         _createPostFromIdea(ideaId) {
             if (!ideaId) return Promise.reject(new Error('Idea is missing.'));
-            return this._requestKanbanMutation('/workspace/{{ workspace.id }}/ideas/' + ideaId + '/create-post/', {})
+            return this._requestKanbanMutation(this._urlFor('ideaCreatePost', ideaId), {})
                 .then((payload) => {
                     if (!payload || !payload.ok || !payload.post_id || !payload.compose_url) {
                         throw new Error('Could not create a post from this idea.');
@@ -1741,7 +1787,7 @@ function kanbanBoard() {
 
         deleteIdea(ideaId) {
             if (!ideaId) return;
-            this._requestKanbanMutation('/workspace/{{ workspace.id }}/ideas/' + ideaId + '/delete/', {})
+            this._requestKanbanMutation(this._urlFor('ideaDelete', ideaId), {})
                 .then(() => {
                     if (!this._removeCardById(ideaId)) {
                         return this.refreshBoardHard();
@@ -1773,7 +1819,7 @@ function kanbanBoard() {
 
         deleteGroup(groupId) {
             if (!groupId) return;
-            this._requestKanbanMutation('/workspace/{{ workspace.id }}/ideas/groups/' + groupId + '/delete/', {})
+            this._requestKanbanMutation(this._urlFor('groupDelete', groupId), {})
                 .then(() => {
                     if (!this._removeColumnById(groupId)) {
                         return this.refreshBoardHard();
@@ -1876,7 +1922,7 @@ function kanbanBoard() {
             var newOrder = Array.from(container.querySelectorAll('.kanban-column')).map(function(c) { return c.dataset.groupId; });
             var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value
                 || document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
-            fetch('/workspace/{{ workspace.id }}/ideas/groups/reorder/', {
+            fetch(this._urlFor('groupReorder'), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1932,7 +1978,7 @@ function kanbanBoard() {
             // Fire server request in background (no full-board reload)
             var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value
                 || document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
-            fetch('/workspace/{{ workspace.id }}/ideas/' + ideaId + '/move/', {
+            fetch(this._urlFor('ideaMove', ideaId), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
