@@ -25,7 +25,7 @@
         <form method="post" action="{% url 'account_logout' %}">
             {% csrf_token %}
             <div class="flex gap-3">
-                <a href="/" class="btn-outline flex-1">Cancel</a>
+                <a href="{% url 'dashboard' %}" class="btn-outline flex-1">Cancel</a>
                 <button type="submit" class="btn-brand flex-1">Sign Out</button>
             </div>
         </form>

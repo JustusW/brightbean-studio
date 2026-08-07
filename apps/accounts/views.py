@@ -217,14 +217,18 @@ def _handle_account_deletion(request, user):
 @require_http_methods(["GET", "POST"])
 def accept_terms(request):
     """Terms of Service acceptance page for social signup users."""
+    # redirect("dashboard"), NOT redirect("/"). A literal "/" is used
+    # verbatim and carries no script prefix, so under FORCE_SCRIPT_NAME it
+    # leaves the application entirely and lands on whatever else answers at
+    # that origin. Reversing the view name gets the prefix from Django.
     if request.user.tos_accepted_at is not None:
-        return redirect("/")
+        return redirect("dashboard")
 
     if request.method == "POST":
         if request.POST.get("agree"):
             request.user.tos_accepted_at = timezone.now()
             request.user.save(update_fields=["tos_accepted_at"])
-            return redirect("/")
+            return redirect("dashboard")
         messages.error(request, "You must agree to the Terms of Service and Privacy Policy to continue.")
 
     return render(request, "account/accept_terms.html")

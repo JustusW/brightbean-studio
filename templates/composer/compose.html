@@ -535,7 +535,7 @@
                          x-data="{ boards: [], boardsLoading: false, boardsLoaded: false }"
                          x-effect="if (charLimits[accId]?.platform === 'pinterest' && !boardsLoaded) {
                              boardsLoading = true;
-                             fetch(`/workspace/{{ workspace.id }}/compose/pinterest-boards/${accId}/`)
+                             fetch(_urlFor('pinterestBoards', accId))
                                  .then(r => r.json())
                                  .then(data => { boards = data.boards || []; boardsLoaded = true; })
                                  .catch(() => {})
@@ -820,7 +820,7 @@
                                  $watch('ttBrandingBlocked', () => enforceBrandingLock())"
                          x-effect="if (charLimits[accId]?.platform === 'tiktok' && !ttLoaded && !ttLoading) {
                              ttLoading = true;
-                             fetch(`/workspace/{{ workspace.id }}/compose/tiktok-creator-info/${accId}/`)
+                             fetch(_urlFor('tiktokCreatorInfo', accId))
                                  .then(r => r.ok ? r.json() : null)
                                  .then(data => {
                                      if (data) {
@@ -1981,6 +1981,43 @@ function composerApp() {
         autosavedPostId: '{{ post.id|default:"" }}',
         mediaItems: JSON.parse(document.getElementById('composer-media-items').textContent),
 
+        // EVERY URL REVERSED, NEVER WRITTEN BY HAND.
+        //
+        // Nine endpoints in this template were built by string
+        // concatenation, which is only correct while Django is served at
+        // the root of its host. Under a script prefix the hand-written
+        // path omits the prefix and the request lands on whatever else
+        // answers at that origin - never on Django.
+        //
+        // THE WORST OF THEM IS `save`: once the first autosave creates a
+        // draft, init() rewrote the FORM'S OWN hx-post to a hand-built
+        // path, so from that moment every Save Draft and every Publish on
+        // a new post went somewhere else. `autosave` did the same, so the
+        // draft quietly stopped being saved at all.
+        //
+        // The id-bearing routes are reversed once against a placeholder
+        // and the real id substituted at call time, which keeps Django's
+        // URLconf the single source of these paths even for ids that only
+        // exist at runtime. Nested x-data scopes inherit this component's
+        // methods, so the per-account panels can call it too.
+        _idPlaceholder: '00000000-0000-0000-0000-000000000000',
+        _urls: {
+            autosaveEdit: '{% url "composer:autosave_edit" workspace_id=workspace.id post_id="00000000-0000-0000-0000-000000000000" %}',
+            savePostEdit: '{% url "composer:save_post_edit" workspace_id=workspace.id post_id="00000000-0000-0000-0000-000000000000" %}',
+            uploadMediaPost: '{% url "composer:upload_media_post" workspace_id=workspace.id post_id="00000000-0000-0000-0000-000000000000" %}',
+            unsplashImportPost: '{% url "composer:unsplash_import_post" workspace_id=workspace.id post_id="00000000-0000-0000-0000-000000000000" %}',
+            mediaStream: '{% url "composer:media_stream" workspace_id=workspace.id asset_id="00000000-0000-0000-0000-000000000000" %}',
+            mediaFilmstrip: '{% url "composer:media_filmstrip" workspace_id=workspace.id asset_id="00000000-0000-0000-0000-000000000000" %}',
+            pinterestBoards: '{% url "composer:pinterest_boards" workspace_id=workspace.id account_id="00000000-0000-0000-0000-000000000000" %}',
+            tiktokCreatorInfo: '{% url "composer:tiktok_creator_info" workspace_id=workspace.id account_id="00000000-0000-0000-0000-000000000000" %}',
+        },
+
+        _urlFor(name, id) {
+            var template = this._urls[name] || '';
+            if (!template) return '';
+            return id ? template.replace(this._idPlaceholder, id) : template;
+        },
+
         // Unsplash search modal
         showUnsplashModal: false,
         unsplashChips: ['Coffee', 'Nature', 'Food', 'City', 'People', 'Minimal', 'Workspace', 'Travel', 'Texture', 'Flowers'],
@@ -2099,19 +2136,19 @@ function composerApp() {
                     // Update the autosave trigger URL to use the edit endpoint
                     const trigger = document.getElementById('autosave-trigger');
                     if (trigger) {
-                        const editUrl = `/workspace/{{ workspace.id }}/compose/${detail.postId}/autosave/`;
+                        const editUrl = this._urlFor('autosaveEdit', detail.postId);
                         trigger.setAttribute('hx-post', editUrl);
                         htmx.process(trigger);
                     }
                     // Also update the main form's action URL
                     const form = document.getElementById('composer-form');
                     if (form) {
-                        const editSaveUrl = `/workspace/{{ workspace.id }}/compose/${detail.postId}/save/`;
+                        const editSaveUrl = this._urlFor('savePostEdit', detail.postId);
                         form.setAttribute('hx-post', editSaveUrl);
                         htmx.process(form);
                     }
                     // Update upload URL to attach media to the post directly
-                    this.uploadUrl = `/workspace/{{ workspace.id }}/compose/${detail.postId}/upload-media/`;
+                    this.uploadUrl = this._urlFor('uploadMediaPost', detail.postId);
                 }
             });
 
@@ -2301,7 +2338,7 @@ function composerApp() {
             this.unsplashImporting = true;
             this.unsplashError = '';
             const url = this.autosavedPostId
-                ? `/workspace/{{ workspace.id }}/compose/${this.autosavedPostId}/unsplash-import/`
+                ? this._urlFor('unsplashImportPost', this.autosavedPostId)
                 : '{% url "composer:unsplash_import" workspace_id=workspace.id %}';
             const csrf = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
             fetch(url, {
@@ -2347,7 +2384,7 @@ function composerApp() {
             const assetId = attached.dataset.assetId;
             this.frameAssetId = assetId || null;
             const url = assetId
-                ? `/workspace/{{ workspace.id }}/compose/media-stream/${assetId}/`
+                ? this._urlFor('mediaStream', assetId)
                 : attached.getAttribute('src').split('#')[0];
             this.frameVideoUrl = url;
             // crossorigin only helps when the file is actually cross-origin
@@ -2394,7 +2431,7 @@ function composerApp() {
             // each frame via byte ranges, so we only download ~8 small JPEGs).
             // Fall back to client-side extraction if it's unavailable.
             if (this.frameAssetId) {
-                fetch(`/workspace/{{ workspace.id }}/compose/media-filmstrip/${this.frameAssetId}/`)
+                fetch(this._urlFor('mediaFilmstrip', this.frameAssetId))
                     .then(r => r.ok ? r.json() : Promise.reject(r))
                     .then(data => {
                         if (run !== this._filmstripRun) return;
@@ -2726,7 +2763,7 @@ function composerApp() {
                         window.htmx.process(inserted.parentElement);
                     }
                     if (self.autosavedPostId && !self.uploadUrl.includes(self.autosavedPostId)) {
-                        self.uploadUrl = `/workspace/{{ workspace.id }}/compose/${self.autosavedPostId}/upload-media/`;
+                        self.uploadUrl = self._urlFor('uploadMediaPost', self.autosavedPostId);
                     }
                     // Auto-set YouTube thumbnail to latest uploaded image
                     if (file.type.startsWith('image/')) {

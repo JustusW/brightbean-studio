@@ -244,10 +244,12 @@ def accept_invite(request, token):
                 },
             )
 
-        # Redirect to first assigned workspace or home
+        # Redirect to first assigned workspace or home. "dashboard" and not
+        # "/": a literal path is used verbatim and carries no script prefix,
+        # so under FORCE_SCRIPT_NAME it leaves the application entirely.
         if request.user.last_workspace_id:
             return redirect("calendar:calendar", workspace_id=request.user.last_workspace_id)
-        return redirect("/")
+        return redirect("dashboard")
 
     # GET - store token in session for signup flow
     request.session["pending_invite_token"] = token

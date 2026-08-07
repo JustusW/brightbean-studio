@@ -121,11 +121,11 @@
         </form>
         {% else %}
         <!-- Not logged in: signup or login -->
-        <a href="/accounts/signup/?next={{ accept_url }}" class="btn btn-primary">
+        <a href="{% url 'account_signup' %}?next={{ accept_url }}" class="btn btn-primary">
             Sign Up to Join
         </a>
         <div class="or-divider">or</div>
-        <a href="/accounts/login/?next={{ accept_url }}" class="btn btn-secondary">
+        <a href="{% url 'account_login' %}?next={{ accept_url }}" class="btn btn-secondary">
             Log In to Join
         </a>
         {% endif %}

@@ -44,14 +44,19 @@ Expects context: workspace, csrf_token.
                             @click="
                                 deleting = true;
                                 const acctParam = deleteAccountId ? '?account=' + deleteAccountId : '';
-                                fetch('/workspace/{{ workspace.id }}/compose/' + deletePostId + '/delete/' + acctParam, {
+                                const deleteUrl = '{% url "composer:post_delete" workspace_id=workspace.id post_id="00000000-0000-0000-0000-000000000000" %}'.replace('00000000-0000-0000-0000-000000000000', deletePostId);
+                                fetch(deleteUrl + acctParam, {
                                     method: 'POST',
                                     headers: { 'X-CSRFToken': '{{ csrf_token }}' }
-                                }).then(() => {
+                                }).then((response) => {
+                                    if (!response.ok) throw new Error('Could not delete this post (' + response.status + ').');
                                     showDeleteModal = false;
                                     deleting = false;
                                     window.dispatchEvent(new CustomEvent('post-deleted'));
-                                }).catch(() => { deleting = false; });
+                                }).catch((error) => {
+                                    deleting = false;
+                                    window.alert(error && error.message ? error.message : 'Could not delete this post. Please try again.');
+                                });
                             "
                             :class="deleting && 'opacity-50 cursor-not-allowed'"
                             class="flex-1 px-4 py-2 text-sm font-semibold text-white bg-red-500 rounded-full hover:bg-red-600 transition-colors cursor-pointer">
