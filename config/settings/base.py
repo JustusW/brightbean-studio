@@ -553,6 +553,11 @@ PLATFORM_CREDENTIALS_FROM_ENV = {
     # WordPress - site URL plus a per-user application password, both typed
     # at connect time. Nothing to register, so no app-level credentials.
     "wordpress": {},
+    # Impressionen - the club's own picture wall. It publishes NOWHERE, so
+    # there is nothing to register and nothing to type: this is the only
+    # entry here that is empty because the channel genuinely has no
+    # counterparty, rather than because the credential is per-account.
+    "impressionen": {},
 }
 
 # Webhook verification

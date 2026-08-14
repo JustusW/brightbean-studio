@@ -58,6 +58,13 @@ class PlatformCredential(models.Model):
         # entry in REQUIRED_CREDENTIAL_KEYS above - like bluesky and
         # mastodon, there are no app-level credentials to configure.
         WORDPRESS = "wordpress", "WordPress"
+        # The club's own picture wall on its website - see
+        # providers/impressionen.py. It PUBLISHES NOWHERE: there is no
+        # endpoint behind it at all, so like bluesky and mastodon it needs
+        # no entry in REQUIRED_CREDENTIAL_KEYS above - and unlike them it
+        # has no per-account credential to type either. Connecting it is
+        # one press with nothing to fill in.
+        IMPRESSIONEN = "impressionen", "Impressionen"
 
     class TestResult(models.TextChoices):
         SUCCESS = "success", "Success"

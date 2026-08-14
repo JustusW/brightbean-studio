@@ -280,6 +280,8 @@ def connect_platform(request, workspace_id):
         return redirect("social_accounts:connect_devto", workspace_id=workspace_id)
     if platform == PlatformCredential.Platform.WORDPRESS:
         return redirect("social_accounts:connect_wordpress", workspace_id=workspace_id)
+    if platform == PlatformCredential.Platform.IMPRESSIONEN:
+        return redirect("social_accounts:connect_impressionen", workspace_id=workspace_id)
 
     # Standard OAuth flow
     provider = _get_provider_for_platform(platform, request.org.id)
@@ -754,6 +756,60 @@ def connect_wordpress(request, workspace_id):
 
 
 # ------------------------------------------------------------------
+# Impressionen Connect (nothing to authenticate, nothing to type)
+# ------------------------------------------------------------------
+
+
+@login_required
+@require_permission("manage_social_accounts")
+def connect_impressionen(request, workspace_id):
+    """Connect the club's own picture wall.
+
+    THE ONLY CONNECT VIEW HERE WITH NO CREDENTIAL AT ALL. There is no
+    account to log into and no key to paste: the channel publishes
+    nowhere, so "connecting" it just means the workspace now has one to
+    compose against. See providers/impressionen.py.
+
+    Still a GET-then-POST rather than acting on the GET. A link that
+    changes state is one a prefetcher, a mail client or a stray refresh
+    will pull for you - and the confirm page is also the one place the
+    person is told what this channel does and does not do.
+
+    Nothing here is wrapped in a try: with no network call there is no
+    provider failure to translate into advice, so anything that raises is
+    a real fault and should surface as one rather than as a friendly
+    message hiding a database error.
+    """
+    if request.method == "GET":
+        return render(
+            request,
+            "social_accounts/impressionen_connect.html",
+            {"workspace_id": workspace_id},
+        )
+
+    from providers.impressionen import PLACEHOLDER_TOKEN
+
+    provider = _get_provider_for_platform(PlatformCredential.Platform.IMPRESSIONEN, request.org.id)
+    # Synthetic, and the same every time - which is what keeps this to one
+    # Impressionen channel per workspace via the unique constraint on
+    # (workspace, platform, account_platform_id).
+    profile = provider.get_profile(PLACEHOLDER_TOKEN)
+
+    _create_or_update_account(
+        workspace_id=workspace_id,
+        platform=PlatformCredential.Platform.IMPRESSIONEN,
+        profile=profile,
+        access_token=PLACEHOLDER_TOKEN,
+    )
+    messages.success(
+        request,
+        "Connected Impressionen. Posts published here go to the club's own "
+        "picture wall and to no platform at all.",
+    )
+    return redirect("calendar:calendar", workspace_id=workspace_id)
+
+
+# ------------------------------------------------------------------
 # Mastodon Connect (instance-based OAuth)
 # ------------------------------------------------------------------
 
@@ -872,6 +928,8 @@ def reconnect(request, workspace_id, account_id):
         return redirect("social_accounts:connect_devto", workspace_id=workspace_id)
     if platform == PlatformCredential.Platform.WORDPRESS:
         return redirect("social_accounts:connect_wordpress", workspace_id=workspace_id)
+    if platform == PlatformCredential.Platform.IMPRESSIONEN:
+        return redirect("social_accounts:connect_impressionen", workspace_id=workspace_id)
 
     # Standard OAuth reconnect
     provider = _get_provider_for_platform(platform, request.org.id)

@@ -140,6 +140,10 @@ class SocialAccount(models.Model):
         # An article on the club's own site. The limit is a sanity ceiling
         # rather than a platform rule - WordPress imposes none.
         "wordpress": 65535,
+        # The picture wall. The caption is not rendered there at all - the
+        # gallery shows images and their alt text - so this is a ceiling
+        # for the sake of having one, matched to Instagram's out of habit.
+        "impressionen": 2200,
     }
 
     @property
@@ -187,6 +191,14 @@ class SocialAccount(models.Model):
             "title_max_length": 200,
             "title_label": "Post Title",
             "caption_label": "Body (HTML)",
+        },
+        # The club's own picture wall. No first comment, because there is
+        # nowhere for a comment to go - the engine would schedule one and
+        # the provider would raise NotImplementedError two minutes later,
+        # which is a log line nobody asked for.
+        "impressionen": {
+            "caption_label": "Caption (kept with the post; the wall shows the picture)",
+            "supports_first_comment": False,
         },
     }
 
@@ -240,6 +252,7 @@ class SocialAccount(models.Model):
             "mastodon": "ma",
             "devto": "dv",
             "wordpress": "wp",
+            "impressionen": "im",
         }
         return icons.get(self.platform, self.platform[:2])
 

@@ -12,6 +12,7 @@ from .bluesky import BlueskyProvider
 from .devto import DevtoProvider
 from .facebook import FacebookProvider
 from .google_business import GoogleBusinessProvider
+from .impressionen import ImpressionenProvider
 from .instagram import InstagramProvider
 from .instagram_login import InstagramLoginProvider
 from .linkedin_company import LinkedInCompanyProvider
@@ -41,6 +42,9 @@ PROVIDER_REGISTRY: dict[str, type[SocialProvider]] = {
     "mastodon": MastodonProvider,
     "devto": DevtoProvider,
     "wordpress": WordPressProvider,
+    # Publishes nowhere - it exists so a picture can reach the club's own
+    # Impressionen wall without also going to Instagram.
+    "impressionen": ImpressionenProvider,
 }
 
 
