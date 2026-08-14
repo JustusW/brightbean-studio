@@ -430,8 +430,12 @@ function calendarApp() {
 function publishList() {
     return {
         activeTab: '{{ active_tab|default:"queue" }}',
-        activeChannel: '',
-        activeTag: '',
+        // SEEDED FROM THE REQUEST, not blank. The rows were already being
+        // filtered server-side by these very parameters, so a blank pair of
+        // dropdowns was the page disagreeing with itself - and it meant no
+        // URL could ever restore them. See active_channel in calendar_view.
+        activeChannel: '{{ active_channel|escapejs }}',
+        activeTag: '{{ active_tag|escapejs }}',
         displayTimezone: '{{ display_timezone|default:"UTC" }}',
 
         tabUrls: {
@@ -447,16 +451,50 @@ function publishList() {
 
         switchTab(tab) {
             this.activeTab = tab;
-            this.reloadTab();
+            // PUSH, so Back comes back HERE. Opening a post is a real
+            // navigation away from this page; with no history entry naming
+            // the tab, Back reloads whatever the address bar still said -
+            // which was the page as first opened. That is the whole of
+            // "every selection vanishes and I return to queue".
+            this.reloadTab(true);
         },
 
-        reloadTab() {
+        // THE LIST'S STATE, IN THE FORM calendar_view ALREADY READS BACK:
+        // mode, tab, channel, tag, tz. Built in one place so the address bar
+        // and the request can never come to name different things.
+        listUrl() {
+            const params = new URLSearchParams();
+            params.set('mode', 'list');
+            params.set('tab', this.activeTab);
+            if (this.activeChannel) params.set('channel', this.activeChannel);
+            if (this.activeTag) params.set('tag', this.activeTag);
+            if (this.displayTimezone) params.set('tz', this.displayTimezone);
+            return '{% url "calendar:calendar" workspace_id=workspace.id %}?' + params.toString();
+        },
+
+        reloadTab(push = false) {
             const params = new URLSearchParams();
             if (this.activeChannel) params.set('channel', this.activeChannel);
             if (this.activeTag) params.set('tag', this.activeTag);
             if (this.displayTimezone) params.set('tz', this.displayTimezone);
             const url = this.tabUrls[this.activeTab] + '?' + params.toString();
             htmx.ajax('GET', url, {target: '#tab-content', swap: 'innerHTML'});
+
+            // The address bar gets the FULL-PAGE url, not the tab partial's:
+            // Back has to land on something that renders the whole page, and
+            // calendar_view serves exactly this - the initial tab inline,
+            // already filtered, with the dropdowns seeded to match.
+            //
+            // push for a TAB (somewhere you were), replace for a FILTER (a
+            // refinement of where you are). Pushing both would make Back
+            // walk backwards through every dropdown twiddle before it
+            // finally left the page, which is its own annoyance.
+            const here = this.listUrl();
+            if (push) {
+                history.pushState({}, '', here);
+            } else {
+                history.replaceState({}, '', here);
+            }
         }
     };
 }

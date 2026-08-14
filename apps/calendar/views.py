@@ -681,6 +681,17 @@ def calendar_view(request, workspace_id):
         "workspace": workspace,
         "mode": mode,
         "active_tab": active_tab,
+        # THE FILTERS, HANDED BACK TO THE PAGE THAT SET THEM.
+        #
+        # _get_tab_context already reads both off request.GET, so a full load
+        # of ?mode=list&tab=drafts&channel=X&tag=Y renders the right rows
+        # server-side and always did. What was missing is the other half: the
+        # shell's Alpine component hard-coded activeChannel/activeTag to '',
+        # so the dropdowns came back empty and disagreed with the rows beside
+        # them. Seeding them here is what lets the browser's Back button
+        # restore the list somebody was actually looking at.
+        "active_channel": request.GET.get("channel", ""),
+        "active_tag": request.GET.get("tag", ""),
         "view_type": view_type,
         "target_date": target_date,
         "social_accounts": social_accounts,
