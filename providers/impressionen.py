@@ -59,12 +59,35 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 
-#: The account's id on "the platform". A CONSTANT, deliberately:
-#: SocialAccount is unique on (workspace, platform, account_platform_id),
-#: so a fixed value means exactly one Impressionen channel per workspace
-#: and pressing connect twice updates that one rather than growing a
-#: second identical channel nobody can tell apart.
-ACCOUNT_ID = "impressionen"
+#: What a channel is called when nobody says otherwise.
+DEFAULT_NAME = "Impressionen"
+
+#: The account's id on "the platform", DERIVED FROM ITS NAME.
+#:
+#: It was a constant, and the constant was the guarantee: SocialAccount
+#: is unique on (workspace, platform, account_platform_id), so one fixed
+#: value meant exactly one channel per workspace. Naming is free now, so
+#: the NAME carries that job instead - the same name is the same channel
+#: and pressing connect twice updates it rather than growing a second one
+#: nobody can tell apart, while a different name is a different channel.
+#:
+#: SLUGGED RATHER THAN USED RAW, because this is an identity: "Bilder
+#: 2026" and "bilder 2026" are the same channel to a person and would be
+#: two rows to a database. Lowercase, and anything that is not a letter
+#: or a digit becomes a single dash.
+#:
+#: NOTE FOR ANYONE ADDING A SECOND CHANNEL HERE: the club's website pins
+#: its Impressionen wall to this PLATFORM and not to an account - see
+#: surface_gallery_extra_platforms - which was safe only while one
+#: channel per workspace was structurally guaranteed. It no longer is.
+#: EVERY channel on this platform now shows on that public wall. A
+#: staging area that must NOT be public is a different platform, not a
+#: different name.
+def channel_id(name: str) -> str:
+    slug = "".join(c.lower() if c.isalnum() else "-" for c in (name or ""))
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-") or "impressionen"
 
 #: Stored as the account's token. NOT a secret and not a credential -
 #: there is nothing to authenticate against. It exists because several
@@ -155,16 +178,25 @@ class ImpressionenProvider(SocialProvider):
     def get_profile(self, access_token: str) -> AccountProfile:
         """The channel, described without asking anybody.
 
-        Synthetic on purpose: there is no remote account to fetch, so
-        this is the one place the channel's name is decided. It is also
-        what ``validate_token`` calls, which means a health check on this
-        account can never fail - correctly, because there is nothing that
-        could be unhealthy.
+        THE ARGUMENT IS THE CHANNEL'S NAME, not a credential, and that
+        is not a trick played on the signature - it is the only honest
+        reading. There is no remote account to fetch and no secret to
+        present, so the base class's ``access_token`` has nothing to
+        carry here. What the connect screen collects is a name, and this
+        is the one place a channel's identity is decided.
+
+        A BLANK OR PLACEHOLDER ARGUMENT MEANS THE DEFAULT, which is what
+        keeps ``validate_token`` honest: it calls this with the stored
+        token, and a health check on a channel that reaches no network
+        must never be able to fail.
         """
+        name = (access_token or "").strip()
+        if not name or name == PLACEHOLDER_TOKEN:
+            name = DEFAULT_NAME
         return AccountProfile(
-            platform_id=ACCOUNT_ID,
-            name="Impressionen",
-            handle="impressionen",
+            platform_id=channel_id(name),
+            name=name[:255],
+            handle=channel_id(name),
             avatar_url="",
             follower_count=0,
         )

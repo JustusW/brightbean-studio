@@ -780,31 +780,50 @@ def connect_impressionen(request, workspace_id):
     a real fault and should surface as one rather than as a friendly
     message hiding a database error.
     """
+    from providers.impressionen import DEFAULT_NAME, PLACEHOLDER_TOKEN
+
     if request.method == "GET":
         return render(
             request,
             "social_accounts/impressionen_connect.html",
-            {"workspace_id": workspace_id},
+            {"workspace_id": workspace_id, "default_name": DEFAULT_NAME},
         )
 
-    from providers.impressionen import PLACEHOLDER_TOKEN
+    # THE ONLY THING THIS SCREEN COLLECTS, and it is a name rather than a
+    # credential. Blank means the default, so the button still works with
+    # nothing typed - which is how this behaved when the name was fixed.
+    name = (request.POST.get("name", "") or "").strip() or DEFAULT_NAME
+    if len(name) > 255:
+        messages.error(request, "That name is too long.")
+        return render(
+            request,
+            "social_accounts/impressionen_connect.html",
+            {"workspace_id": workspace_id, "default_name": DEFAULT_NAME},
+        )
 
     provider = _get_provider_for_platform(PlatformCredential.Platform.IMPRESSIONEN, request.org.id)
-    # Synthetic, and the same every time - which is what keeps this to one
-    # Impressionen channel per workspace via the unique constraint on
-    # (workspace, platform, account_platform_id).
-    profile = provider.get_profile(PLACEHOLDER_TOKEN)
+    # The name IS the identity: get_profile slugs it into
+    # account_platform_id, and SocialAccount is unique on (workspace,
+    # platform, account_platform_id). So the same name is the same
+    # channel - pressing connect twice updates it rather than growing a
+    # second one nobody can tell apart - and a different name is a
+    # different channel.
+    profile = provider.get_profile(name)
 
     _create_or_update_account(
         workspace_id=workspace_id,
         platform=PlatformCredential.Platform.IMPRESSIONEN,
         profile=profile,
+        # The STORED token stays the placeholder. There is nothing to
+        # authenticate with, and keeping the name out of the token field
+        # means renaming a channel later is a display change rather than
+        # a credential change.
         access_token=PLACEHOLDER_TOKEN,
     )
     messages.success(
         request,
-        "Connected Impressionen. Posts published here go to the club's own "
-        "picture wall and to no platform at all.",
+        f"Connected {profile.name}. Posts published here go to the club's "
+        "own picture wall and to no platform at all.",
     )
     return redirect("calendar:calendar", workspace_id=workspace_id)
 
