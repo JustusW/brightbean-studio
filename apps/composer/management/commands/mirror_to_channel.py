@@ -17,15 +17,36 @@ post to its website without posting to Instagram, and write for the web
 because none of the existing history is on the new channel. This puts
 it there.
 
-IT COPIES THE PLATFORM POST, NOT THE POST. A Post already carries its
-title, caption, tags and media; what says "this appeared on that
-channel" is a PlatformPost. So each post gains one more, on the new
-channel, and keeps its Instagram one. Nothing is duplicated: the same
-Post and the same MediaAssets are pointed at from both.
+IT MAKES A REAL COPY OF THE POST, AND THE FIRST VERSION DID NOT.
 
-WHICH IS ALSO WHY THE PICTURE WALL DOES NOT DOUBLE UP. Its query is
-SELECT DISTINCT ON (ma.id) - it dedupes on the media asset - so a
-photograph reachable through two channels appears once.
+That version created one more PlatformPost against the SAME Post, and
+this docstring argued for it: a Post already carries the title, caption
+and media, so pointing a second channel at it duplicates nothing. It is
+a tidy argument and it is wrong, because it makes the two channels ONE
+THING wearing two names. The shepherd found out how wrong by curating
+the picture wall - removing ten photographs he did not want on
+Impressionen - and watching them vanish from the club's front page and
+its Instagram archive at the same time, because all three were editing
+one row:
+
+    "I told you to copy the posts... And instead you fucking linked
+     them all... Now Aktuelles has lost all images that I wanted gone
+     from Impressionen"
+
+He said COPY. This now copies: a new Post with its own PostMedia rows,
+pointing at the same MediaAssets in the library. Editing one channel's
+post cannot reach another's, which is the entire point of giving a
+channel its own posts.
+
+THE ASSETS ARE STILL SHARED, and that is correct rather than a
+half-measure: a MediaAsset is the photograph itself, one file on disk.
+Copying files per channel would multiply the media library by the
+number of channels and mean a re-crop had to be done three times.
+Removing a picture from a post detaches it; it does not delete it.
+
+THE PICTURE WALL STILL DOES NOT DOUBLE UP, for the same reason as
+before: its query is SELECT DISTINCT ON (ma.id), so it dedupes on the
+ASSET, and two copies pointing at one photograph show it once.
 
 CREATED ALREADY PUBLISHED, and that is the safety property rather than
 a shortcut. PlatformPost.published is a TERMINAL state - look at
@@ -46,11 +67,26 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from apps.composer.models import PlatformPost
+import uuid
+
+from apps.composer.models import PlatformPost, Post, PostMedia
 from apps.credentials.models import PlatformCredential
 from apps.social_accounts.models import SocialAccount
 from apps.workspaces.models import Workspace
-from providers.impressionen import PLACEHOLDER_TOKEN, channel_id
+from providers.impressionen import channel_id
+
+#: WHAT A COPY REMEMBERS IT IS A COPY OF, written into internal_notes.
+#:
+#: The old version keyed idempotency on (post, target channel), which
+#: worked only because both channels shared one Post. Now that each gets
+#: its own, the source post has NO platform post on the target and that
+#: test would answer "not done yet" every single time - so a second run
+#: would build a parallel set of copies, and a third another.
+#:
+#: internal_notes rather than a column: this is provenance as much as a
+#: key, and in a year somebody will want to know why two posts carry the
+#: same caption.
+MIRROR_MARKER = "mirror-of:"
 
 
 class Command(BaseCommand):
@@ -126,8 +162,14 @@ class Command(BaseCommand):
         for original in published:
             if original.post.workspace_id != workspace.id:
                 continue
-            if target is not None and PlatformPost.objects.filter(
-                    post=original.post, social_account=target).exists():
+            # ALREADY COPIED? Asked of the MARKER, not of the source post's
+            # platform posts - the copy is a different row, so the source
+            # has nothing on the target to find. See MIRROR_MARKER.
+            if target is not None and Post.objects.filter(
+                    workspace=workspace,
+                    platform_posts__social_account=target,
+                    internal_notes__contains=f"{MIRROR_MARKER}{original.post_id}",
+            ).exists():
                 skipped += 1
                 continue
 
@@ -169,12 +211,28 @@ class Command(BaseCommand):
             account_handle=ident,
             avatar_url="",
             follower_count=0,
-            # Not a credential and not a secret: this channel reaches no
-            # network. It is stored because several code paths test
-            # `if account.oauth_access_token:` to decide whether an
-            # account is worth acting on, and an empty string there reads
-            # as "never connected" rather than "needs nothing".
-            oauth_access_token=PLACEHOLDER_TOKEN,
+            # THE NAME, AND IT MUST BE THE NAME. Not a credential and not
+            # a secret: this channel reaches no network. It is stored
+            # because several code paths test `if
+            # account.oauth_access_token:` to decide whether an account is
+            # worth acting on, and an empty string there reads as "never
+            # connected" rather than "needs nothing".
+            #
+            # THIS SAID PLACEHOLDER_TOKEN AND IT EMPTIED THE FRONT PAGE
+            # OVERNIGHT. ImpressionenProvider.get_profile reads the stored
+            # token AS THE CHANNEL'S NAME, and falls back to DEFAULT_NAME
+            # for a blank or placeholder one - so the first health check
+            # to validate this account renamed "Aktuelles" to
+            # "Impressionen", rewrote its handle to match, and the
+            # website's feed - which pins by name - matched nothing.
+            # Measured the next morning: {"items":[]} on a site that had
+            # been correct at midnight, with nothing in any log to say
+            # why, because nothing had gone wrong. A validation had
+            # succeeded.
+            #
+            # The name IS the token for this provider. Storing anything
+            # else is storing a rename with a delay on it.
+            oauth_access_token=name[:255],
             connection_status=SocialAccount.ConnectionStatus.CONNECTED,
         )
         # The same thing the connect view does, so a channel made here
@@ -185,9 +243,49 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def _copy(self, original, target):
-        """One more PlatformPost, on the target channel."""
+        """A COPY of the post, on the target channel. Not a second pointer.
+
+        The post is duplicated with its own PostMedia rows; the
+        MediaAssets themselves are shared, because those are the
+        photographs and there is one of each. See the module docstring
+        for what linking instead of copying cost.
+        """
+        source = original.post
+
+        copy = Post.objects.get(pk=source.pk)
+        copy.pk = uuid.uuid4()
+        copy._state.adding = True
+        # WHERE IT CAME FROM - the idempotency key and the provenance.
+        #
+        # AND THE IMPORT MARKER IS DEFUSED IN THE SAME BREATH.
+        # import_wordpress finds its own work with
+        # `internal_notes__contains=marker` and --prune DELETES any post
+        # carrying the marker it no longer claims. Three posts sharing one
+        # marker would make it pick one arbitrarily and leave the copies
+        # deletable by a later import. "wordpress-import-copy:" does not
+        # start with "wordpress-import:", so prune's startswith test
+        # passes over it.
+        notes = (source.internal_notes or "").replace(
+            "wordpress-import:", "wordpress-import-copy:")
+        copy.internal_notes = (
+            f"{notes}\n{MIRROR_MARKER}{source.pk}\n"
+            f"Eigener Beitrag des Kanals {target.account_name}.\n")
+        copy.save()
+        # created_at is auto_now_add, and the website's feed uses it as
+        # the tiebreak when published_at is null - so a copy that kept
+        # today's date would sort to the top as though it were news.
+        Post.objects.filter(pk=copy.pk).update(created_at=source.created_at)
+
+        for attachment in source.media_attachments.order_by("position"):
+            PostMedia.objects.create(
+                post=copy,
+                media_asset=attachment.media_asset,
+                position=attachment.position,
+                alt_text=attachment.alt_text,
+            )
+
         PlatformPost.objects.create(
-            post=original.post,
+            post=copy,
             social_account=target,
             status=PlatformPost.Status.PUBLISHED,
             published_at=original.published_at,
