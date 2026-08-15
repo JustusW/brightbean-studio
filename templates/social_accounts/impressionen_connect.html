@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block page_title %}Connect Impressionen{% endblock %}
+{% block page_title %}Connect Webseite{% endblock %}
 {% block content %}
 {% comment %}
 The one connect page with no field on it. There is nothing to
@@ -18,7 +18,7 @@ state gets pulled by prefetchers and stray refreshes.
             <div class="w-10 h-10 rounded-xl bg-stone-100 flex items-center justify-center">
                 {% include "social_accounts/partials/_platform_icon.html" with platform="impressionen" size="6" %}
             </div>
-            <h2 class="text-xl font-semibold text-stone-900">Connect Impressionen</h2>
+            <h2 class="text-xl font-semibold text-stone-900">Connect Webseite</h2>
         </div>
         <p class="text-sm text-stone-500">The club&rsquo;s own picture wall on its website. There is nothing to log in to and nothing to paste.</p>
     </div>
@@ -30,7 +30,7 @@ state gets pulled by prefetchers and stray refreshes.
             <div class="flex gap-2.5">
                 <svg class="w-4 h-4 text-stone-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                 <div class="text-xs text-stone-600 space-y-2">
-                    <p><strong class="font-semibold text-stone-700">Nothing is ever sent to a platform.</strong> This channel has no API behind it. A post published here is marked published and appears on the website&rsquo;s Impressionen page &mdash; that is the whole of what it does.</p>
+                    <p><strong class="font-semibold text-stone-700">Nothing is ever sent to a platform.</strong> This channel has no API behind it. A post published here is marked published and appears on the club&rsquo;s website - on Aktuelles or on the Impressionen wall, depending which channel you chose &mdash; that is the whole of what it does.</p>
                     <p>Use it for pictures that belong on the club&rsquo;s own wall but should <em>not</em> go to Instagram.</p>
                     <p><strong class="font-semibold text-stone-700">Attach at least one picture.</strong> The wall shows images only, so a video&#8209;only or text&#8209;only post would publish successfully and then appear nowhere. Publishing refuses it instead.</p>
                 </div>
@@ -60,7 +60,7 @@ state gets pulled by prefetchers and stray refreshes.
 
         <div class="flex items-center gap-3 pt-2">
             <button type="submit" class="inline-flex items-center gap-2 px-6 py-2.5 text-sm font-semibold text-white bg-orange-500 rounded-full shadow-[0_4px_14px_rgba(249,115,22,0.28)] hover:bg-orange-600 transition-all duration-200 cursor-pointer">
-                Connect Impressionen
+                Connect Webseite
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
             </button>
             <a href="{% url 'social_accounts:connect' workspace_id=workspace_id %}" class="px-4 py-2.5 text-sm font-semibold text-stone-600 hover:text-stone-800 transition-colors">Cancel</a>

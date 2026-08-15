@@ -64,7 +64,18 @@ class PlatformCredential(models.Model):
         # no entry in REQUIRED_CREDENTIAL_KEYS above - and unlike them it
         # has no per-account credential to type either. Connecting it is
         # one press with nothing to fill in.
-        IMPRESSIONEN = "impressionen", "Impressionen"
+        # THE LABEL IS "Webseite"; THE KEY STAYS "impressionen".
+        #
+        # This platform carries the club's website: Aktuelles is the front
+        # page and Impressionen is the picture wall, both channels ON it.
+        # Naming the platform after one of its own channels was confusing
+        # from the day the second one existed.
+        #
+        # The key is NOT touched. It is stored on every SocialAccount row,
+        # named in the website's surface.toml, and declared in params.conf
+        # - so changing it means a data migration and a configuration
+        # change that must land in the same instant. A label is free.
+        IMPRESSIONEN = "impressionen", "Webseite"
 
     class TestResult(models.TextChoices):
         SUCCESS = "success", "Success"

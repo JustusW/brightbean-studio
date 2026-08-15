@@ -111,7 +111,16 @@ class ImpressionenProvider(SocialProvider):
 
     @property
     def platform_name(self) -> str:
-        return "Impressionen"
+        # WEBSEITE, not "Impressionen". This platform IS the club's
+        # website, and Impressionen is one channel on it - the picture
+        # wall - beside Aktuelles, which is the front page. Naming the
+        # platform after one of its channels stopped being accurate the
+        # moment the second one existed.
+        #
+        # The stored key is still "impressionen": see the comment on
+        # PlatformCredential.Platform.IMPRESSIONEN for why that one is
+        # not free to change.
+        return "Webseite"
 
     @property
     def auth_type(self) -> AuthType:
@@ -221,10 +230,14 @@ class ImpressionenProvider(SocialProvider):
         pictures = self._pictures(content)
         if not pictures:
             raise PublishError(
-                "Impressionen shows pictures, and this post has none. Attach "
-                "at least one image (jpg, png, gif or webp) - a video or a "
-                "text-only post would publish successfully and then appear "
-                "nowhere on the wall.",
+                "Diese Webseiten-Veröffentlichung hat kein Bild. Bitte "
+                "mindestens ein Bild anhängen (jpg, png, gif oder webp) - "
+                "ein Video oder ein reiner Textbeitrag würde erfolgreich "
+                "veröffentlicht und dann nirgends erscheinen.\n\n"
+                "HINWEIS: Diese Regel stammt von der Bilderwand "
+                "(Impressionen). Der Kanal Aktuelles ist die Startseite und "
+                "könnte reine Textmeldungen sinnvoll zeigen - das ist noch "
+                "nicht umgestellt.",
                 platform=self.platform_name,
             )
 
