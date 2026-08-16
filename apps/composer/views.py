@@ -1383,6 +1383,10 @@ def thumbnail_upload(request, workspace_id):
         file_size=uploaded_file.size,
         source="upload",
     )
+    # THIS ONE ALSO READS asset.thumbnail TWO LINES DOWN, which could
+    # never be set: nothing generated it. So the YouTube thumbnail
+    # picker has always fallen through to the full-size original.
+    _process_new_asset(asset)
 
     url = ""
     if asset.thumbnail:
@@ -1770,6 +1774,7 @@ def unsplash_import(request, workspace_id, post_id=None):
                 attribution=f"Photo by {_as_str(photo.get('photographer')) or 'Unknown'} on Unsplash",
                 alt_text=_as_str(photo.get("alt")),
             )
+            _process_new_asset(asset)
             new_assets.append(asset)
             attachment = _attach_asset_for_composer(request, workspace, asset, post)
             if attachment is not None:
@@ -2052,6 +2057,7 @@ def upload_media(request, workspace_id, post_id=None):
         file_size=uploaded_file.size,
         source="upload",
     )
+    _process_new_asset(asset)
 
     if post_id:
         post = get_object_or_404(Post, id=post_id, workspace=workspace)
@@ -2456,6 +2462,40 @@ def _sync_idea_media_attachments(idea, workspace, ordered_asset_ids):
         idea.save(update_fields=["media_asset", "updated_at"])
 
 
+def _process_new_asset(asset):
+    """Queue metadata extraction and thumbnailing for a freshly made asset.
+
+    WITHOUT THIS AN UPLOAD HAS NO DIMENSIONS AND NO THUMBNAIL, and neither
+    is cosmetic. MediaAsset.width/height default to 0, and the club's
+    website writes those straight onto the <img> of its picture wall - a
+    slide is `width: auto; height: 100%`, so a zero-width image collapses
+    the slide, Swiper builds its snap grid from the collapsed widths, and
+    the whole strip ends up parked thousands of pixels off screen showing
+    nothing. That was measured on the live site once already: 38 of 46
+    slides zero pixels wide, the wrapper translated to x=31340.
+
+    THE MEDIA LIBRARY UPLOADER HAS ALWAYS DONE THIS - media_library.views.
+    upload calls process_media_asset immediately after create_asset - and
+    the four composer paths that make an asset never did. So which
+    uploader a person happened to use decided whether their picture
+    worked, silently, and the composer is the one the club actually uses.
+    Measured: of 79 assets, exactly the two uploaded through the composer
+    were stored 0x0; the twelve from the library page were all correct.
+
+    IT IS THE SAME TASK, NOT A SECOND IMPLEMENTATION. process_media_asset
+    extracts the metadata AND writes the thumbnail, is already exercised
+    by the library path, and runs on the tasks worker that is already
+    deployed - so this adds no new moving part to keep alive.
+
+    Imported inside the function because apps.media_library.tasks pulls in
+    background_task at import time; every other media_library import in
+    this module is local for the same reason.
+    """
+    from apps.media_library.tasks import process_media_asset
+
+    process_media_asset(str(asset.id))
+
+
 def _create_idea_media_asset(workspace, user, uploaded_file):
     """Create a MediaAsset from an uploaded file for Idea create/edit flows."""
     from apps.media_library.models import MediaAsset
@@ -2470,7 +2510,7 @@ def _create_idea_media_asset(workspace, user, uploaded_file):
     else:
         media_type = MediaAsset.MediaType.DOCUMENT
 
-    return MediaAsset.objects.create(
+    asset = MediaAsset.objects.create(
         organization=workspace.organization,
         workspace=workspace,
         uploaded_by=user,
@@ -2481,6 +2521,8 @@ def _create_idea_media_asset(workspace, user, uploaded_file):
         file_size=uploaded_file.size,
         source="upload",
     )
+    _process_new_asset(asset)
+    return asset
 
 
 @login_required
